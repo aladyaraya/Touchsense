@@ -1,0 +1,213 @@
+{
+  "schema_version": "1.0.0",
+  "memory_version": "1.3.46",
+  "updated_at": "2026-09-22T12:50:00+08:00",
+  "project": {
+    "name": "TouchScene",
+    "type": "blind_and_low_vision_accessible_photography_assistant",
+    "stage": "hackathon_prototype",
+    "active": true,
+    "one_sentence": "Speech explains what is present, planar touch communicates where it is, and sparse haptics guide independent framing."
+  },
+  "canonical_files": {
+    "agent_instructions": "touchscene-agent/AGENTS.md",
+    "human_memory": "touchscene-agent/MEMORY.md",
+    "machine_state": "touchscene-agent/state.json",
+    "insta360_ace_sdk_notes": "touchscene-agent/INSTA360_ACE_SDK.md",
+    "requirements_and_tech_route": "touchscene-agent/REQUIREMENTS_AND_TECH_ROUTE.md",
+    "web_app": "dist/touchpuck/index.html",
+    "web_core": "dist/touchpuck/core.mjs",
+    "firmware": "firmware/touchpuck_ble/touchpuck_ble.ino",
+    "commissioning": "scripts/touchpuck-commission.ps1",
+    "technical_note": "docs/android-haptic-closed-loop.md",
+    "mobile_bom": "hardware/touchpuck-mobile-bom.csv"
+    ,"android_mvp": "实际开发/android/TouchScene"
+    ,"android_implementation_status": "实际开发/IMPLEMENTATION_STATUS.md"
+    ,"physical_connectivity_handoff": "实际开发/实体连接性测试资料包_20260922/README.md"
+    ,"current_implementation_summary": "实际开发/TouchScene_当前实现与待办总结_20260922.md"
+    ,"team_sync_snapshot": "实际开发/TouchScene_团队同步资料_20260922/00_开始阅读/README.md"
+  },
+  "product_model": {
+    "speech_role": "scene semantics and exceptional conditions",
+    "planar_touch_role": "active exploration of position, boundary, extent, and empty space",
+    "realtime_haptic_role": "continuous sparse framing correction",
+    "preferred_flow": [
+      "describe",
+      "explore",
+      "select_subject",
+      "guide_framing",
+      "confirm_capture"
+    ],
+    "exploration_map_policy": "freeze during touch exploration; mark stale on material camera movement and refresh explicitly",
+    "binary_semantics": {
+      "0": "background and silence",
+      "1": "selected subject and sustained or low-duty repeating feedback",
+      "edge": "separate thick boundary map with a discrete entry or crossing pulse"
+    },
+    "critical_boundary": "A single phone or tablet motor provides global vibration; spatial layout comes from touch coordinates and proprioception, not localized actuation."
+  },
+  "prototype": {
+    "deployment_url": "https://touchscene-360.aladyaraya.chatgpt.site/touchpuck/",
+    "target_client": "Android Chrome PWA over HTTPS",
+    "tactile_grid": {
+      "width": 64,
+      "height": 48,
+      "modes": [
+        "background",
+        "fill",
+        "edge",
+        "keypoint"
+      ]
+    },
+    "outputs": [
+      "navigator.vibrate",
+      "web_bluetooth_esp32"
+    ],
+    "physical_feedback_sensor": "optional SW-420"
+  },
+  "camera_sdk": {
+    "family": "Insta360 Ace",
+    "supported_platform_confirmed": "Android",
+    "sdk_generation": "V2.x.x",
+    "modules": [
+      "com.arashivision.sdk:sdk-camera",
+      "com.arashivision.sdk:sdk-media"
+    ],
+    "preview_transport": [
+      "Wi-Fi",
+      "USB"
+    ],
+    "ble_role": "control and Wi-Fi bootstrap; no preview stream",
+    "preview_callback": "CameraStreamListener.onStreamDataNotify(PreviewStreamFrame)",
+    "preview_encoding": [
+      "H.264",
+      "H.265"
+    ],
+    "recommended_app_boundary": "Android native or native plus WebView; keep PWA as fallback",
+    "access_dependency": "SDK download and Maven credentials from Insta360 developer application"
+  },
+  "evidence": {
+    "verified": [
+      "seven core Node tests",
+      "browser mock coordinate and state QA rerun on 2026-09-22 with Chrome and Playwright Core: HTTP 200, zero browser errors, 100/100 coordinate matches, simulated sensor success and timeout branches, and no horizontal overflow",
+      "downloadable 100-point JSON report generation",
+      "firmware compilation with sensor disabled and enabled",
+      "responsive mobile layout and wiring asset loading"
+      ,"official Ace Android SDK capability for real-time encoded preview, capture control, and Wi-Fi/USB connection"
+      ,"Android SDK 2.1.5 debug and unsigned release builds after native TouchScene integration"
+      ,"Android preview debug-layer switch implemented for original RGB, grayscale, binary subject, Canny edges, and final TouchMap"
+      ,"on-demand scene description uses the source frame paired with the frozen TouchMap during exploration"
+      ,"37 Android JVM tests passed, including capture terminal callback ordering, concurrent deduplication, and no-new-frame refresh coverage"
+      ,"current debug and unsigned release APKs built successfully after no-new-frame refresh protection; 37 JVM tests pass"
+      ,"API 35 Google APIs emulator ran 5/5 Android instrumentation tests on two consecutive runs, including 100 View-level taps, letterbox and direction announcements, contact-stable map replacement, and a no-camera Activity flow"
+      ,"out-of-map touch release no longer announces a previous valid tactile cell at code level"
+      ,"TactileMapView defers map and debug replacement during finger contact; freeze and refresh controls request finger lift"
+      ,"no-camera local demo operated on API 35 emulator: frame loaded, map frozen, direction cursor announced subject grid cell, local-contour description completed, and metadata JSONL trace persisted"
+      ,"repeatable no-camera Android Activity test verifies processed map, local-demo identity, disabled capture, freeze, direction exploration, and description completion"
+      ,"emulator UI and Logcat confirmed refresh with no newer frame keeps v1 and logs NO_NEW_FRAME"
+      ,"supplied Android-SDK-2.1.5.zip SHA-256 6651295FE89C05C4C919D885F41379FF235379E63CB711893AB1716089FD7F99"
+      ,"historical r2 Android MVP delivery ZIP independently rebuilt from copied source with 29 passing JVM tests; SHA-256 27CEE784F74F58879F8C96745A31AB9C1A093673F2FCEECD0A440EBBBD91796B"
+      ,"historical r3 Android MVP delivery ZIP independently rebuilt from copied source with 31 passing JVM tests; SHA-256 7C3E4E32FCD54F9A0021CFB447B96C97383550907D68CDD7F9E7B0DECAD11EBD"
+      ,"historical r3 ZIP lacks the later 37-test preview-switch, capture-terminal, and refresh-safety changes"
+      ,"historical r4 Android MVP delivery ZIP independently rebuilt from a 200-file source copy with 0 hash differences; 37 JVM tests, 5 API 35 emulator tests, Debug/unsigned Release and instrumentation APKs, and Lint 0 errors/101 warnings; 221 entries, no local credentials or build caches; SHA-256 566300FF044C8F0AB7F4E9E422E321B98CA8103BF8EA3E086DC9422F85A42D90; predates voice no-camera guard"
+      ,"voice capture now rejects photo/start/stop commands in local-demo or disconnected state before mode switching; Activity-level API 35 emulator regression passed for all three entries; current source passed 37 JVM, 5 instrumentation, Debug/unsigned Release, and Lint 0 errors/101 warnings"
+      ,"historical r5 Android MVP ZIP independently rebuilt from 200-file source copy with zero path/hash differences; 37 JVM tests, 5 API 35 emulator tests, Debug/unsigned Release/instrumentation APKs, and Lint 0 errors/101 warnings; 221 ZIP entries individually hash-verified against source with no local credentials, keystores, or build caches; 325778416 bytes; SHA-256 E44D059835E4A617B7166D562C6BCA0463144CB666497938036E47CE718F28D1; predates half-duplex speech fix"
+      ,"Android source adds TTS-before-audio interruption and conditional ASR resume for active push-to-talk, suppressing late utterance callbacks and disabling background listening after spoken command replies; 40 JVM tests passed at this stage"
+      ,"current voice capture propagates PHOTO/VIDEO mode-switch failure instead of unbounded waiting, and dispatches capture only after target mode/capture readiness; 3 added JVM tests for rejected, not-ready, and exactly-once dispatch; 43 JVM tests, 5 API 35 instrumentation tests, Debug/unsigned Release, and Lint 0 errors/101 warnings passed"
+      ,"current video recording start feedback is emitted only after SDK working or recording-time callback, deduplicated once and invalidated on failure/cancel/stop/detach; video finish and photo finish have distinct spoken/visible feedback; 46 JVM tests, 5 API 35 instrumentation tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings passed"
+      ,"current Android source has a bounded 64-map performance window with decoded-frame receipt-to-processing and receipt-to-visible-map P95 latency plus map FPS in a metadata-only pause trace; local demo is identified; 49 JVM tests, Debug build, and Lint 0 errors/101 warnings passed"
+      ,"current no-camera Activity instrumentation test confirms a new persisted JSONL performance/map_window event with local_demo marker and nonzero samples; current source passed 49 JVM tests, 5 API 35 Google APIs emulator instrumentation tests, Debug and unsigned Release builds, and Lint 0 errors/101 warnings"
+      ,"haptic edge cooldown now cancels the previous repeating subject fill rather than leaving it active on a boundary; 49 JVM tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings passed; physical motor behavior remains unverified"
+      ,"multi-pointer exploration now cancels haptics, suppresses ambiguous coordinate sampling, and defers map replacement until final finger release; new API 35 View test passed in a 6/6 instrumentation suite; current source passed 49 JVM tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings"
+      ,"MVP fake camera provides rectangle, circle, irregular/person, and empty YUV fixtures through the production Canny/TouchMap path; fake motion, fixed-phrase vision, and edge drivers are test-only and absent from release DEX; description timeout now claims failure before interrupting worker to prevent late success; current source passed 52 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings"
+      ,"completed successful scene descriptions are cached by source-frame timestamp and TouchMap version; repeat requests on the same frozen frame return immediately, new frames are reanalyzed, and failed requests remain retryable; current source passed 54 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings"
+      ,"READY now fires once per stable episode rather than repeating during continuous stillness; detected movement rearms it, while stability duration and 2000 ms cooldown still apply; current source passed 55 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings; Ace motion calibration and physical cues remain unverified"
+      ,"independent vision lane now runs periodic on-device scene analysis at most every five seconds in LIVE mode; automatic speech requires useful changed subject/position/size/clipping/lighting signature and five-second cooldown, while manual queries preempt inference and active ASR/TTS/frozen exploration suppress announcements; current source passed 58 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings; acoustic behavior and real Ace scene-change quality remain unverified"
+      ,"active scene query returns a recent automatic result synchronously only while LIVE and STABLE, within five seconds of the analyzed frame, without measured intervening motion or a newer frame already offered to the dispatcher; otherwise it reanalyzes the correct source without mismatching an older edge map, while frozen exploration retains frozen-frame priority; pause invalidates the recent result; current source passed 62 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release builds, and Lint 0 errors/101 warnings; physical-device latency and description quality remain unverified"
+      ,"ML Kit speech labels now use a conservative Chinese vocabulary and filter unknown English labels before choosing three names; the preview page can explicitly return from frozen exploration to LIVE, disable scanning, rearm READY with its existing cooldown, and prevent Freeze from bypassing Refresh while exploring; current source passed 66 JVM tests, 6 API 35 emulator tests including a live-explore-live round trip, Debug/unsigned Release builds, and Lint 0 errors/101 warnings; physical Ace/TalkBack/haptic behavior and model coverage remain unverified"
+      ,"non-overwriting r6 delivery copy has 214 app/src files identical to live source by relative path and SHA-256; independent offline copy passed 66 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release/instrumentation APK builds, and Lint 0 errors/101 warnings; final 235-entry ZIP is 325812265 bytes, entry-by-entry hash verified with zero mismatches and no build caches, real local config, or keystores; ZIP SHA-256 A8E2BC470BDF936E1864C6F6584DB2AC41F76D57BA451F9AF0E75EB669BCB2B0; unsigned release and physical gates remain open"
+      ,"latest Android lintDebug XML report contains zero errors and 101 warnings"
+      ,"native directional controls expose frozen TouchMap coordinate and cell class with finite haptic cues at software level"
+      ,"90-second main/fallback demo and physical Gate runbook drafted"
+      ,"Android physical-Gate evidence collector PowerShell parsed with zero errors and correctly refused to write evidence when adb listed no active physical phone; hardware collection path remains unverified"
+      ,"Android physical-Gate evidence collector also refused an online API 35 emulator with exit code 1 and no evidence directory; the emulator was stopped afterward"
+      ,"TouchMap keypoint now snaps to an actual fill cell nearest the subject centroid, preventing a concave shape's empty center from being mislabeled; U-shaped and empty-map regression added; current source passed 67 JVM tests with zero failures; physical tactile meaning remains unverified"
+      ,"non-overwriting r7 delivery copy has 214 app/src files matching live source by relative path and SHA-256; independent offline copy passed 67 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release/instrumentation APK builds and Lint 0 errors/101 warnings; three APKs hash-match independent outputs; 236-entry ZIP is 325817075 bytes, entry-by-entry hash verified with zero mismatches and no caches, real local config or keystores; ZIP SHA-256 5F4893516B74BA0C65DB4EF2347E81CA3777E95BDF106F1AB84C3917A2D0FC2D; signing and physical gates remain open"
+      ,"latest-frame dispatcher now contains executor scheduling rejection during preview shutdown without propagating to the camera callback; injected stopped-vision-executor regression verifies Edge still receives a frame; live source passed 68 JVM tests and Debug build; r7 ZIP predates this fix, and Ace disconnect remains unverified"
+      ,"non-overwriting r8 delivery copy has 214 app/src files matching live source by relative path and SHA-256; independent offline copy passed 68 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release/instrumentation APK builds and Lint 0 errors/101 warnings; three APKs hash-match independent outputs; 236-entry ZIP is 325818518 bytes, entry-by-entry hash verified with zero mismatches and no caches, real local config or keystores; ZIP SHA-256 0891B563619C9CF06D9C149633FB82A3E0AFD18E27EFC3641EBB70AFBF65A83B; signing and physical gates remain open"
+      ,"MVP acceptance audit added for the technical route, detailed plan, and user-supplied architecture image; boundary waveform changed from early-route double tick to diagram/plan 150 ms long pulse while keypoint retains 50/50/50 ms double pulse; latest source passed 69 JVM tests and Debug build; physical perceptual validation remains unverified and r8 ZIP predates the waveform edit"
+      ,"non-overwriting r9 delivery copy has 214 app/src files matching live source by relative path and SHA-256; independent offline copy passed 69 JVM tests, 6 API 35 emulator tests, Debug/unsigned Release/instrumentation APK builds and Lint 0 errors/101 warnings; three APKs hash-match independent outputs; 237-entry ZIP is 325821960 bytes, entry-by-entry hash verified with zero mismatches and no caches, real local config or keystores; ZIP SHA-256 B8388A7D14B029CE4AE3551BF67AA688604546324A6E6819F7DE5821B7F63404; signing and physical gates remain open"
+      ,"main acceptance matrix delivery row corrected to r9 after detecting stale r8 wording; r9 ZIP was not modified and its SHA-256 was rechecked unchanged; physical adb device still absent"
+      ,"physical-connectivity handoff assembled with official SDK 2.1.5 Demo APK, r9 TouchScene Debug APK, collector, full Gate/audit references, and blank record; 7-file manifest verified and 8-entry ZIP independently entry-hash-verified, SHA-256 3011E36AF71FB67ABEC7056A72CF3E6E4B95C1EE7D8CD66084C2023210818C16; both APKs have package com.insta360.kmpsdk.demo but different signing certificates, so deliberate data-clearing uninstall is required between tests; no physical Gate passed"
+      ,"current-state document added at 实际开发/TouchScene_当前实现与待办总结_20260922.md; separates implemented/software-verified, implemented-but-device-unverified, testing/tuning/release work, and explicitly out-of-v1.1 product scope; no new runtime tests or physical Gates passed"
+      ,"team-sync snapshot assembled with r9 Android archive, focused field-test package, supplied SDK archive, current and clearly separated historical TouchScene documents, Web/ESP32 prototypes, reports/scripts and portable agent memory; unrelated projects and r2-r8 binaries excluded; packaging does not close any physical Gate"
+    ],
+    "simulated": [
+      "27-31 ms mock RTT",
+      "mock physical success and timeout states",
+      "100/100 browser mapping without real BLE hardware",
+      "fake-ADB physical-Gate collector self-test passed device metadata, APK hash, TouchSceneTrace filtering, latest JSONL pull and not_assessed manifest assertions; temporary evidence was removed; no real device was involved"
+    ],
+    "unverified": [
+      "real Android vibration behavior",
+      "real BLE RTT and packet loss",
+      "physical ESP32 motor and SW-420 loop",
+      "ten-minute thermal stability",
+      "participant tactile recognition",
+      "continuous Insta360 live stream integration",
+      "blind and low-vision user evaluation",
+      "on-device semantic vision model accuracy and latency on the target phone"
+      ,"debug-layer rendering and alignment on the target Android device"
+      ,"SDK player window-crop parity with the decoded-frame tactile map"
+      ,"session JSONL file persistence and Logcat output on target Android hardware"
+      ,"TalkBack end-to-end flow and direction-control focus, speech, and haptics on a physical Android device"
+      ,"signed installable release APK and physical-device acceptance report"
+      ,"actual Ace SDK resource release after individual cleanup failures"
+      ,"Ace SDK fault-injection verification of lens/mode switch recovery and busy-state release"
+      ,"Ace SDK callback-order and rapid consecutive capture verification"
+      ,"TactileMapView and TalkBack acceptance on a physical Android device"
+      ,"actual ASR/TTS acoustic echo suppression and callback order on the target Android device"
+      ,"actual Ace recording start/stop callback order, spoken feedback, and haptic perception on the target device"
+      ,"actual Ace-device map FPS and P95 processing/visible latency; physical touch-to-motor and READY-to-haptic latency"
+    ]
+  },
+  "protocol": {
+    "service_uuid": "7b100001-6c7d-4c7a-9a31-54bf3f010001",
+    "command_bytes": 10,
+    "ack_bytes": 9,
+    "browser_ack_timeout_ms": 450,
+    "firmware_watchdog_ms": 600,
+    "physical_confirm_status": 3,
+    "physical_timeout_status": 4
+  },
+  "constraints": {
+    "hackathon_window_hours": 48,
+    "do_not_claim": [
+      "localized tablet tactile pixels",
+      "physical motor success from GPIO ACK alone",
+      "real hardware latency from mock RTT",
+      "tested Insta360 live video integration",
+      "universal suitability for all blind users"
+    ],
+    "out_of_scope": [
+      "dense electromagnetic pin array",
+      "custom multi-actuator driver board",
+      "photographic physical relief reconstruction"
+    ]
+  },
+  "next_actions": [
+    "implement the five-state hybrid photography workflow",
+    "add speech-only, touch-only, and hybrid experiment modes",
+    "define portrait framing metrics",
+    "run real Android plus ESP32 acceptance testing",
+    "conduct blind and low-vision participant research",
+    "verify the exact Insta360 model and SDK path"
+  ],
+  "superseded_or_separate_material": [
+    "StoryBean",
+    "FrameFit",
+    "writing robot",
+    "magnetic bead drawing board",
+    "dense tactile pin array"
+  ]
+}

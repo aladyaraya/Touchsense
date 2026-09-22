@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f6f8fb"/><stop offset="1" stop-color="#dde6ed"/></linearGradient>
+    <linearGradient id="puck" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#162432"/><stop offset="1" stop-color="#334c5d"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-opacity=".18"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#ef765d"/></marker>
+    <style>
+      .title{font:700 34px system-ui,'Microsoft YaHei';fill:#15212b}.sub{font:500 17px system-ui,'Microsoft YaHei';fill:#5b6b78}
+      .h{font:700 20px system-ui,'Microsoft YaHei';fill:#15212b}.t{font:500 15px system-ui,'Microsoft YaHei';fill:#50606c}
+      .label{font:700 15px system-ui,'Microsoft YaHei';fill:#fff}.line{stroke:#ef765d;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <text x="60" y="70" class="title">TouchPuck · 单像素扫描式触觉相机</text>
+  <text x="60" y="103" class="sub">把 64 个执行器降为 2 个：手的位置保留二维空间，触觉头只表达当前像素</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="165" width="665" height="445" rx="24" fill="#fff"/>
+    <rect x="112" y="210" width="580" height="355" rx="16" fill="#182630"/>
+    <rect x="130" y="228" width="544" height="319" rx="10" fill="#e9edf0" stroke="#aab7c0" stroke-width="2"/>
+    <path d="M270 445 C325 365 350 305 438 304 C514 304 520 391 595 425" fill="none" stroke="#121b22" stroke-width="18" stroke-linecap="round"/>
+    <path d="M301 458 C360 394 432 422 475 478" fill="none" stroke="#121b22" stroke-width="10" stroke-linecap="round"/>
+    <path d="M130 228 l25 0 l-25 25z" fill="#ef765d"/>
+    <text x="145" y="590" class="t">A5 磨砂探索板 · 物理边界 + 左上角方向缺口</text>
+  </g>
+
+  <g transform="translate(420 365)" filter="url(#shadow)">
+    <ellipse cx="0" cy="0" rx="88" ry="62" fill="url(#puck)"/>
+    <ellipse cx="0" cy="-7" rx="34" ry="26" fill="#dae2e7"/>
+    <circle cx="0" cy="-7" r="8" fill="#ef765d"/>
+    <text x="-48" y="88" class="h">TouchPuck</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="805" y="150" width="330" height="480" rx="24" fill="#fff"/>
+    <text x="840" y="196" class="h">内部堆叠（约 75×55×32 mm）</text>
+    <rect x="850" y="230" width="240" height="54" rx="12" fill="#ef765d"/>
+    <text x="879" y="264" class="label">硅胶触点 + 1 mm 行程针</text>
+    <rect x="850" y="304" width="240" height="54" rx="12" fill="#2d4758"/>
+    <text x="883" y="338" class="label">5V 推式电磁铁 · 轮廓敲击</text>
+    <rect x="850" y="378" width="240" height="54" rx="12" fill="#6d93a8"/>
+    <text x="880" y="412" class="label">5V 扁平马达 · 主体振动</text>
+    <rect x="850" y="452" width="240" height="54" rx="12" fill="#2d4758"/>
+    <text x="875" y="486" class="label">ESP32-C3 + 双 MOSFET</text>
+    <rect x="850" y="526" width="240" height="54" rx="12" fill="#162432"/>
+    <text x="875" y="560" class="label">USB 鼠标 PCB · 二维定位</text>
+  </g>
+
+  <path d="M525 345 C660 250 725 240 842 253" class="line"/>
+  <text x="628" y="245" class="t">食指感受局部状态</text>
+  <path d="M500 456 C668 500 727 546 842 551" class="line"/>
+  <text x="628" y="526" class="t">移动即扫描图像坐标</text>
+
+  <g transform="translate(70 670)">
+    <circle cx="12" cy="-5" r="8" fill="#ef765d"/><text x="30" y="0" class="t">轮廓：短敲</text>
+    <circle cx="202" cy="-5" r="8" fill="#6d93a8"/><text x="220" y="0" class="t">内部：弱振</text>
+    <circle cx="380" cy="-5" r="8" fill="#15212b"/><text x="398" y="0" class="t">背景：静默</text>
+    <text x="760" y="0" class="sub">影石相机 → 图像三值化 → 实时触觉查询</text>
+  </g>
+</svg>
