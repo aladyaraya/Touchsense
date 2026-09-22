@@ -4,7 +4,9 @@ import android.graphics.ImageFormat
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -40,6 +42,7 @@ class RawPreviewFramePipeline(
 
     private val assembler =
         EncodedAccessUnitAssembler(
+            acceptedType = null,
             onAccessUnit = { accessUnit ->
                 decoder?.offer(accessUnit)
             },
@@ -118,7 +121,8 @@ private data class DecoderFormat(
 }
 
 /**
- * 使用硬件 MediaCodec 解码到 ImageReader Surface，再复制为紧凑 YUV420。
+ * 常规机型使用 MediaCodec + ImageReader；已确认 ImageReader JNI 崩溃的机型
+ * 改用 MediaCodec 的缓冲区输出，直接从解码后的输出帧复制 YUV。
  * 编码队列有上限；溢出时清空旧帧并请求相机补发关键帧，避免内存持续增长。
  */
 private class SurfaceYuvDecoder(
@@ -130,6 +134,8 @@ private class SurfaceYuvDecoder(
 ) : AutoCloseable {
     private val running = AtomicBoolean(false)
     private val inputQueue = ArrayBlockingQueue<EncodedAccessUnit>(MAX_ENCODED_QUEUE)
+    private val useBufferOutput = Build.MANUFACTURER.equals("HONOR", ignoreCase = true) &&
+        Build.MODEL == "PTP-AN10"
     private lateinit var imageThread: HandlerThread
     private lateinit var imageReader: ImageReader
     private lateinit var codec: MediaCodec
@@ -141,26 +147,34 @@ private class SurfaceYuvDecoder(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            imageThread = HandlerThread("ace-yuv-images").also { it.start() }
-            imageReader =
-                ImageReader.newInstance(
-                    format.width,
-                    format.height,
-                    ImageFormat.YUV_420_888,
-                    MAX_IMAGES,
-                ).also { reader ->
-                    reader.setOnImageAvailableListener(
-                        { source -> consumeLatestImage(source) },
-                        Handler(imageThread.looper),
-                    )
-                }
-
+            if (!useBufferOutput) {
+                imageThread = HandlerThread("ace-yuv-images").also { it.start() }
+                imageReader =
+                    ImageReader.newInstance(
+                        format.width,
+                        format.height,
+                        ImageFormat.YUV_420_888,
+                        MAX_IMAGES,
+                    ).also { reader ->
+                        reader.setOnImageAvailableListener(
+                            { source -> consumeLatestImage(source) },
+                            Handler(imageThread.looper),
+                        )
+                    }
+            }
             codec = MediaCodec.createDecoderByType(format.mime)
+            if (useBufferOutput) Timber.i("Using decoder buffer output %s on %s", codec.name, Build.MODEL)
             val mediaFormat =
                 MediaFormat.createVideoFormat(format.mime, format.width, format.height).apply {
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_ACCESS_UNIT_BYTES)
+                    if (useBufferOutput) {
+                        setInteger(
+                            MediaFormat.KEY_COLOR_FORMAT,
+                            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+                        )
+                    }
                 }
-            codec.configure(mediaFormat, imageReader.surface, null, 0)
+            codec.configure(mediaFormat, if (useBufferOutput) null else imageReader.surface, null, 0)
             codec.start()
 
             codecThread =
@@ -239,7 +253,29 @@ private class SurfaceYuvDecoder(
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     Timber.d("Raw decoder output format: %s", codec.outputFormat)
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
-                else -> if (index >= 0) codec.releaseOutputBuffer(index, true)
+                else -> if (index >= 0) {
+                    if (useBufferOutput) {
+                        try {
+                            val now = SystemClock.elapsedRealtime()
+                            if (info.size > 0 &&
+                                (lastAnalysisAtMs == Long.MIN_VALUE || now - lastAnalysisAtMs >= analysisIntervalMs)
+                            ) {
+                                codec.getOutputImage(index)?.let { image ->
+                                    try {
+                                        lastAnalysisAtMs = now
+                                        onFrame(image.toCompactYuv420(now))
+                                    } finally {
+                                        image.close()
+                                    }
+                                }
+                            }
+                        } finally {
+                            codec.releaseOutputBuffer(index, false)
+                        }
+                    } else {
+                        codec.releaseOutputBuffer(index, true)
+                    }
+                }
             }
         }
     }

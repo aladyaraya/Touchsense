@@ -7,11 +7,11 @@ import java.io.ByteArrayOutputStream
 /**
  * 将 SDK 按相同 timestamp 分批回调的视频数据拼成一个完整编码帧。
  *
- * Ace 单镜头预览通常使用 [PreviewStreamType.VIDEO]。如果目标机型只发送 VIDEO_L
- * 或 VIDEO_R，可在构造时显式切换 [acceptedType]，禁止把左右流拼进同一个解码器。
+ * 默认仅接收 VIDEO；分析预览可传 null，在每次配置后选定首先收到的视频流类型，
+ * 避免只发送 VIDEO_L/VIDEO_R 的机型没有分析帧，同时不混合左右流。
  */
 internal class EncodedAccessUnitAssembler(
-    private val acceptedType: PreviewStreamType = PreviewStreamType.VIDEO,
+    private val acceptedType: PreviewStreamType? = PreviewStreamType.VIDEO,
     private val maxAccessUnitBytes: Int = 8 * 1024 * 1024,
     private val onAccessUnit: (EncodedAccessUnit) -> Unit,
     private val onMalformedUnit: (String) -> Unit = {},
@@ -20,11 +20,14 @@ internal class EncodedAccessUnitAssembler(
 
     private var currentTimestamp: Long? = null
     private var discardedTimestamp: Long? = null
+    private var selectedType: PreviewStreamType? = acceptedType
     private val buffer = ByteArrayOutputStream(256 * 1024)
 
     @Synchronized
     fun offer(frame: PreviewStreamFrame) {
-        if (!frame.type.isVideo || frame.type != acceptedType || frame.data.isEmpty()) return
+        if (!frame.type.isVideo || frame.data.isEmpty()) return
+        if (selectedType == null) selectedType = frame.type
+        if (frame.type != selectedType) return
 
         if (discardedTimestamp == frame.timestamp) return
         discardedTimestamp = null
@@ -55,6 +58,7 @@ internal class EncodedAccessUnitAssembler(
     fun reset() {
         resetLocked()
         discardedTimestamp = null
+        selectedType = acceptedType
     }
 
     private fun flushLocked(timestamp: Long) {

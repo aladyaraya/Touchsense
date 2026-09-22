@@ -9,13 +9,10 @@ import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.view.Gravity
 import android.view.WindowManager
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
@@ -37,10 +34,8 @@ import com.arashivision.sdk.camera.core.model.FunctionType
 import com.arashivision.sdk.camera.core.model.notify.CameraPosture
 import com.arashivision.sdk.camera.core.model.option.SensorMode
 import com.arashivision.sdk.camera.core.model.option.VideoEncode
+import com.arashivision.sdk.common.exception.InstaException
 import com.arashivision.sdk.common.exception.NativeException
-import com.arashivision.sdk.media.api.common.OffsetType
-import com.arashivision.sdk.media.api.common.RenderModel
-import com.arashivision.sdk.media.api.common.StabType
 import com.arashivision.sdk.media.api.listener.PlayerViewListener
 import com.arashivision.sdk.media.api.params.PreviewParams
 import com.arashivision.sdk.media.core.model.OffsetData
@@ -50,13 +45,13 @@ import com.insta360.kmpsdk.demo.databinding.FragmentPreviewBinding
 import com.insta360.kmpsdk.demo.raw.LatestCameraFrameStore
 import com.insta360.kmpsdk.demo.raw.RawPreviewFramePipeline
 import com.insta360.kmpsdk.demo.touchscene.AndroidHapticRenderer
+import com.insta360.kmpsdk.demo.touchscene.TactileCell
+import com.insta360.kmpsdk.demo.touchscene.TactileMap
 import com.insta360.kmpsdk.demo.touchscene.runPreviewCleanup
 import com.insta360.kmpsdk.demo.touchscene.runPreviewSdkSwitch
 import com.insta360.kmpsdk.demo.touchscene.AndroidSpeechOutput
-import com.insta360.kmpsdk.demo.touchscene.AutomaticSceneAnnouncementPolicy
-import com.insta360.kmpsdk.demo.touchscene.SceneDescription
-import com.insta360.kmpsdk.demo.touchscene.StabilityState
 import com.insta360.kmpsdk.demo.touchscene.MlKitSceneDescriber
+import com.insta360.kmpsdk.demo.touchscene.RemoteAiSceneDescriber
 import com.insta360.kmpsdk.demo.touchscene.TactileDebugMode
 import com.insta360.kmpsdk.demo.touchscene.TactileSessionState
 import com.insta360.kmpsdk.demo.touchscene.TouchSceneCoordinator
@@ -73,11 +68,6 @@ import com.insta360.kmpsdk.demo.touchscene.VoiceTurnGate
 import com.insta360.kmpsdk.demo.ui.common.CameraDemoDisplayLabels
 import com.insta360.kmpsdk.demo.ui.common.observeCameraDisconnectedNavigateToConnection
 import com.insta360.kmpsdk.demo.ui.connection.ConnectionViewModel
-import com.insta360.kmpsdk.demo.ui.player.adapter.BOOLEAN_OPTIONS
-import com.insta360.kmpsdk.demo.ui.player.adapter.COLOR_PLUS_INTENSITY_OPTIONS
-import com.insta360.kmpsdk.demo.ui.player.adapter.OFFSET_TYPE_OPTIONS
-import com.insta360.kmpsdk.demo.ui.player.adapter.PROJECTION_OPTIONS
-import com.insta360.kmpsdk.demo.ui.player.adapter.STAB_TYPE_OPTIONS
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -91,30 +81,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import com.arashivision.sdk.media.core.model.WindowCropInfo as MediaWindowCropInfo
 
 /**
- * 带实时预览的拍摄页。SDK 预览开流流程：
+ * TouchScene 拍摄页。
  *
- * 1. device.preview.init() → registerCameraStreamListener → startStream()
+ * 流程：语音/按钮“开始录像”启动 SDK 实时视频流（init → registerCameraStreamListener → startStream）。
+ * 实时画面由 SDK 的 [InstaCapturePlayerView] 经 GL 渲染上屏，合并进“调试图层：原图”
+ * （LIVE 且当前图层为原图时显示；其余图层/冻结态显示 [com.insta360.kmpsdk.demo.touchscene.TactileMapView]）。
+ * YUV 解码仍只在冻结/刷新时短暂跑一帧，经 [TouchSceneCoordinator] 生成触觉图。
  *
- * 2. CameraStreamListener.onOpened（流就绪）
- *    - 调用 playerView.prepare(PreviewParams) → playerView.play()
+ * 语音“冻结当前画面”固定当前帧（center-fit 占满屏宽、高度留白、不改比例）：
+ * - 分支1：自动调用远程 AI 描述一次并语音播报（[RemoteAiSceneDescriber]，请求绑定 USB 以太网、蜂窝兜底）；
+ * - 分支2：手指扫描冻结帧，按背景静默 / 主体连续 / 边界点振三档振动。
  *
- * 3. PlayerViewListener.onLoadingFinish
- *    - playerView.getPipeline() 获取渲染管线
- *    - device.preview.setPipeline(pipeline) 绑定管线，开始送帧
- *
- * 4. CameraStreamListener.onParamsChanged
- *    - SDK 推送分辨率/fps/offset/windowCrop 变更，调用 playerView 对应 set 方法
- *
- * 切镜头/切模式统一入口：[executePreviewSwitch]，由 [PreviewRefreshStrategyDecider] 决定策略：
- * - RESTART_STREAM：完整重启 SDK 流（unregister → stopStream → 切 SDK → register → startStream），prepare 由 onOpened 触发
- * - REBUILD_PLAYER：解绑 pipeline → 切 SDK → 重新 prepare（不停 stream）
- * - NO_OP：仅执行 SDK 切换，预览自然延续
- *
- * 其他重启路径：
- * - 投影模式参数变更：直接重新 prepare（[restartPreviewPlayer]）
- *
- * 释放：
- * - device.preview.unregisterCameraStreamListener → setPipeline(null) → stopStream()
+ * 释放：device.preview.unregisterCameraStreamListener → setPipeline(null) → stopStream()
  */
 class PreviewFragment : Fragment() {
     private var _binding: FragmentPreviewBinding? = null
@@ -131,39 +109,49 @@ class PreviewFragment : Fragment() {
     }
 
     private var lastModeOptions: List<FunctionMode> = emptyList()
-    private var previewPlayerView: InstaCapturePlayerView? = null
     private var previewWidth: Int = 1280
     private var previewHeight: Int = 960
-    private var streamDefaultPreviewWidth: Int = 1280
-    private var streamDefaultPreviewHeight: Int = 960
-    private var previewFps: Int = 30
     private var previewStarted = false
     private var rawFramePipeline: RawPreviewFramePipeline? = null
     private var rawStreamWidth: Int = 0
     private var rawStreamHeight: Int = 0
     private var rawVideoEncode: VideoEncode? = null
-    private var lastRawStatusUpdateMs: Long = 0L
-    private var selectedPreviewResolutionPreset: PreviewResolutionPreset =
-        PreviewResolutionPreset.ORIGINAL
-    private var selectedPreviewRenderModel: RenderModel = RenderModel.AUTO
-    private var selectedStabType: StabType = StabType.AUTO
-    private var selectedOffsetType: OffsetType = OffsetType.ORIGINAL
+    private var stillRequestInFlight = false
+    private var stillRequestIsRefresh = false
+    private var stillRequestGeneration = 0L
     private var selectedLensMode: SensorMode? = null
     private var currentUiState: CameraCaptureUiState? = null
-    private var previewPlayerRestarting = false
     private var touchSceneCoordinator: TouchSceneCoordinator? = null
     private var hapticRenderer: AndroidHapticRenderer? = null
     private var speechOutput: AndroidSpeechOutput? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private val voiceTurnGate = VoiceTurnGate()
-    private val automaticScenePolicy = AutomaticSceneAnnouncementPolicy()
     private var manualDescriptionPending = false
     private var trace = TouchSceneTrace()
     private var performanceMetrics = TouchScenePerformanceMetrics()
     private var traceIo: ExecutorService? = null
     private val firstRawFrameLogged = AtomicBoolean(false)
+    private val firstEncodedFrameLogged = AtomicBoolean(false)
     private var lastTracedSessionState: TactileSessionState? = null
+    private var touchDebugCounts = TactileCellCounts(0, 0, 0)
+    private var touchDebugCountsMapVersion: Long? = null
+    private var livePreviewView: InstaCapturePlayerView? = null
+    private var latestCameraPosture: CameraPosture? = null
     private val localDemoMode: Boolean get() = arguments?.getBoolean("touchsceneLocalDemo") == true
+
+    private data class TactileCellCounts(val background: Int, val subject: Int, val boundary: Int)
+
+    private fun computeCounts(map: TactileMap): TactileCellCounts {
+        var bg = 0; var sub = 0; var bnd = 0
+        for (y in 0 until map.height) for (x in 0 until map.width) {
+            when (map.cellAt(x, y)) {
+                TactileCell.BACKGROUND -> bg++
+                TactileCell.SUBJECT -> sub++
+                TactileCell.BOUNDARY -> bnd++
+            }
+        }
+        return TactileCellCounts(bg, sub, bnd)
+    }
 
     private fun traceEvent(
         stage: String,
@@ -195,57 +183,41 @@ class PreviewFragment : Fragment() {
             if (granted) startVoiceRecognition() else speechOutput?.speak("需要麦克风权限才能使用语音命令")
         }
 
-    private var selectedDynamicStitch: Boolean = false
-    private var selectedDePurpleFilter: Boolean = false
-    private var selectedColorPlus: Boolean = false
-    private var selectedColorPlusIntensityIndex: Int = 0
-    private var selectedImageFusion: Boolean = false
-
-    /** 递增 nonce，过滤旧 prepare 轮次的回调。 */
-    private var activePrepareNonce = 0L
-
-    /** 收起遮罩条件：pipeline 绑定 + 首帧渲染均完成（顺序任意）。 */
-    private var restartStableExpect = 0L
-    private var restartStablePipelineBound = false
-    private var restartStableFirstFrame = false
-
-    private val previewLayoutChangeListener =
-        View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            applyPreviewAspect()
-        }
-
     private val streamListener =
         object : CameraStreamListener {
             override fun onOpening() {
             }
 
             override fun onOpened() {
-                val playerView = previewPlayerView ?: return
                 Timber.d("streamListener.onOpened")
                 traceEvent("preview", "stream_opened")
 
-                // 请求一次关键帧
                 val device = connectionViewModel.getCameraDevice() ?: return
-                device.preview.requestStreamIframe()
-                viewLifecycleOwner.lifecycleScope.launch {
-                    rawVideoEncode =
+                // 某些机型的参数回调晚于视频数据；先缓存预览默认参数。
+                // 用户冻结时才创建解码器并请求关键帧。
+                if (rawStreamWidth <= 0 || rawStreamHeight <= 0) {
+                    rawStreamWidth = previewWidth
+                    rawStreamHeight = previewHeight
+                }
+                rawVideoEncode = VideoEncode.ENCODE_H264
+                configureRawFramePipelineIfReady()
+                lifecycleScope.launch {
+                    val actualEncode =
                         device.system
                             .fetchVideoEncodeType()
                             .onFailure { Timber.w(it, "fetch raw preview encode type") }
                             .getOrNull()
                             ?: VideoEncode.ENCODE_H264
-                    configureRawFramePipelineIfReady()
-                }
-
-                playerView.post {
-                    if (!isAdded) return@post
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        captureViewModel.ui.first { !it.busy }
-                        if (!isAdded || _binding == null || !previewStarted) return@launch
-                        val pv = previewPlayerView ?: return@launch
-                        pv.destroyRender()
-                        prepareAndPlayPreview(pv)
+                    if (rawVideoEncode != actualEncode) {
+                        rawVideoEncode = actualEncode
+                        configureRawFramePipelineIfReady()
                     }
+                }
+                prepareLivePreviewPlayer()
+                _binding?.root?.post {
+                    if (_binding == null) return@post
+                    updateStreamToggleLabel()
+                    speechOutput?.speak(getString(R.string.touchscene_stream_started))
                 }
             }
 
@@ -255,6 +227,9 @@ class PreviewFragment : Fragment() {
             }
 
             override fun onStreamDataNotify(streamData: PreviewStreamFrame) {
+                if (streamData.type.isVideo && firstEncodedFrameLogged.compareAndSet(false, true)) {
+                    traceEvent("preview", "first_encoded_frame", code = streamData.type.toString())
+                }
                 rawFramePipeline?.offer(streamData)
             }
 
@@ -268,48 +243,38 @@ class PreviewFragment : Fragment() {
                 if (paramsUpdate.previewWidth > 0 && paramsUpdate.previewHeight > 0) {
                     rawStreamWidth = paramsUpdate.previewWidth
                     rawStreamHeight = paramsUpdate.previewHeight
-                    configureRawFramePipelineIfReady()
-                }
-                val playerView = previewPlayerView ?: return
-                paramsUpdate.offsetData?.let { offsetData ->
-                    playerView.setOffset(
-                        OffsetData(
-                            offsetV1 = offsetData.offsetV1,
-                            offsetV2 = offsetData.offsetV2,
-                            offsetV3 = offsetData.offsetV3,
-                            offsetV6 = offsetData.offsetV6
-                        ),
-                        paramsUpdate.stabOffset.orEmpty(),
-                    )
-                }
-                if (paramsUpdate.previewWidth > 0 && paramsUpdate.previewHeight > 0 && paramsUpdate.previewFps > 0) {
-                    val resolutionChanged =
-                        previewWidth != paramsUpdate.previewWidth || previewHeight != paramsUpdate.previewHeight
-                    val fpsChanged = previewFps != paramsUpdate.previewFps
-                    streamDefaultPreviewWidth = paramsUpdate.previewWidth
-                    streamDefaultPreviewHeight = paramsUpdate.previewHeight
                     previewWidth = paramsUpdate.previewWidth
                     previewHeight = paramsUpdate.previewHeight
-                    previewFps = paramsUpdate.previewFps
-                    if (resolutionChanged) {
-                        playerView.setPreviewResolution(previewWidth, previewHeight)
-                        applyPreviewAspect()
-                    }
-                    if (fpsChanged) {
-                        playerView.setFps(previewFps)
-                    }
+                    configureRawFramePipelineIfReady()
                 }
-                paramsUpdate.windowCropInfo?.let {
-                    playerView.setWindowCropInfo(
-                        MediaWindowCropInfo(
-                            srcWidth = it.src_width,
-                            srcHeight = it.src_height,
-                            dstWidth = it.dst_width,
-                            dstHeight = it.dst_height,
-                            offsetX = it.crop_offset_x,
-                            offsetY = it.crop_offset_y,
-                        ),
-                    )
+                livePreviewView?.let { view ->
+                    paramsUpdate.offsetData?.let { offset ->
+                        view.setOffset(
+                            OffsetData(
+                                offsetV1 = offset.offsetV1,
+                                offsetV2 = offset.offsetV2,
+                                offsetV3 = offset.offsetV3,
+                                offsetV6 = offset.offsetV6,
+                            ),
+                            paramsUpdate.stabOffset.orEmpty(),
+                        )
+                    }
+                    if (paramsUpdate.previewWidth > 0 && paramsUpdate.previewHeight > 0 && paramsUpdate.previewFps > 0) {
+                        view.setPreviewResolution(paramsUpdate.previewWidth, paramsUpdate.previewHeight)
+                        view.setFps(paramsUpdate.previewFps)
+                    }
+                    paramsUpdate.windowCropInfo?.let { crop ->
+                        view.setWindowCropInfo(
+                            MediaWindowCropInfo(
+                                srcWidth = crop.src_width,
+                                srcHeight = crop.src_height,
+                                dstWidth = crop.dst_width,
+                                dstHeight = crop.dst_height,
+                                offsetX = crop.crop_offset_x,
+                                offsetY = crop.crop_offset_y,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -317,6 +282,7 @@ class PreviewFragment : Fragment() {
     private val touchScenePostureListener =
         object : CameraPostureUpdate {
             override fun updatePosture(cameraPosture: CameraPosture) {
+                latestCameraPosture = cameraPosture
                 val degrees =
                     when (cameraPosture) {
                         CameraPosture.CAMERA_POSTURE_ROTATE_90 -> 90
@@ -325,74 +291,21 @@ class PreviewFragment : Fragment() {
                         else -> 0
                     }
                 touchSceneCoordinator?.setRotationDegrees(degrees)
+                livePreviewView?.post { applyLivePreviewRotation(cameraPosture) }
             }
         }
 
-    private fun tryDismissPreviewRestartOverlay(expect: Long) {
-        if (_binding == null || !isAdded) return
-        if (expect != activePrepareNonce || expect != restartStableExpect) return
-        if (!restartStablePipelineBound || !restartStableFirstFrame) return
-        Timber.d("dismissPreviewRestartOverlay nonce=%d", expect)
-        binding.previewPlaceholderText.isVisible = false
-        setPreviewPlayerRestarting(false)
+    private fun applyLivePreviewRotation(posture: CameraPosture) {
+        val view = livePreviewView ?: return
+        val rotateDegreeContent = when (posture) {
+            CameraPosture.CAMERA_POSTURE_ROTATE_90 -> 90
+            CameraPosture.CAMERA_POSTURE_ROTATE_180 -> 180
+            CameraPosture.CAMERA_POSTURE_ROTATE_270 -> 270
+            else -> 0
+        }
+        view.updateRotate(rotateDegreeContent, 0, posture.nativeValue, posture.nativeValue)
+        view.redetectCameraRotation()
     }
-
-    private fun buildPlayerViewListener(expect: Long): PlayerViewListener =
-        object : PlayerViewListener {
-            override fun onLoadingStatusChanged(isLoading: Boolean) {
-            }
-
-            override fun onLoadingFinish() {
-                if (_binding == null || !isAdded || expect != activePrepareNonce) {
-                    return
-                }
-                val device = connectionViewModel.getCameraDevice() ?: return
-                val playerView = previewPlayerView ?: return
-                val pipeline = playerView.getPipeline()
-                if (pipeline == null) {
-                    Timber.w("skip bind preview pipeline: pipeline is null")
-                    return
-                }
-                Timber.d("onLoadingFinish bind pipeline")
-                device.preview.setPipeline(pipeline)
-                // 请求一次关键帧
-                device.preview.requestStreamIframe()
-                restartStablePipelineBound = true
-                tryDismissPreviewRestartOverlay(expect)
-                // PlayerView 加载完成后以其实际状态为准，读取并刷新参数面板。
-                // 分辨率无 getter 且 PlayerView 不会自持，须按当前 preset 重新下发；stab/offset 仅重置本地值不写回。
-                syncRenderParamsFromPlayer(playerView)
-                applyPreviewResolution(playerView)
-                refreshPreviewParamsBottomSheet()
-            }
-
-            override fun onFail(exception: com.arashivision.sdk.common.exception.InstaException) {
-                if (expect != activePrepareNonce) return
-                Timber.e(exception, "preview player failed nonce=%d", expect)
-                if(exception is NativeException && exception.nativeErrorCode == -4042) {
-                    val pv = previewPlayerView ?: return
-                    if (_binding == null || !previewStarted) return
-                    Timber.d("onFail -4042: restart player nonce=%d", expect)
-                    pv.destroyRender()
-                    pv.post { prepareAndPlayPreview(pv) }
-                }
-            }
-
-            override fun onFirstFrameRendered() {
-                if (_binding == null || expect != activePrepareNonce) {
-                    return
-                }
-                Timber.d("onFirstFrameRendered nonce=%d", expect)
-                restartStableFirstFrame = true
-                tryDismissPreviewRestartOverlay(expect)
-            }
-
-            override fun onReleaseCameraPipeline() {
-                if (expect != activePrepareNonce) return
-                Timber.d("onReleaseCameraPipeline nonce=%d", expect)
-                connectionViewModel.getCameraDevice()?.preview?.setPipeline(null)
-            }
-        }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -412,6 +325,7 @@ class PreviewFragment : Fragment() {
         performanceMetrics = TouchScenePerformanceMetrics()
         traceIo = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "touchscene-trace-io") }
         firstRawFrameLogged.set(false)
+        firstEncodedFrameLogged.set(false)
         lastTracedSessionState = null
         traceEvent(
             "connection",
@@ -420,15 +334,14 @@ class PreviewFragment : Fragment() {
             fallback = if (localDemoMode) "local_demo" else null,
         )
         if (!localDemoMode) observeCameraDisconnectedNavigateToConnection(connectionViewModel)
-        binding.previewPlaceholder.addOnLayoutChangeListener(previewLayoutChangeListener)
         setupTouchScene()
 
         binding.backLink.setOnClickListener { findNavController().popBackStack() }
+        binding.streamToggleBtn.setOnClickListener {
+            if (previewStarted) stopStreamByUser() else startStreamByUser()
+        }
         binding.openModeParamsSheet.setOnClickListener {
             CaptureParamsBottomSheetFragment.show(childFragmentManager)
-        }
-        binding.openPreviewParamsSheet.setOnClickListener {
-            PreviewParamsBottomSheetFragment.show(childFragmentManager)
         }
         binding.captureBtn.setOnClickListener {
             traceEvent("capture", "requested", code = "button")
@@ -441,7 +354,6 @@ class PreviewFragment : Fragment() {
                     currentUiState = s
                     binding.lensSection.isVisible = s.lensRowVisible
                     selectedLensMode = s.selectedLens
-                    applyPreviewGestureAvailability(previewPlayerView)
                     rebuildLensChips(s.lensOptions, s.selectedLens)
                     rebuildModeChips(s.modeOptions, s.selectedMode)
                     binding.captureBtn.text = s.captureButtonLabel
@@ -451,7 +363,6 @@ class PreviewFragment : Fragment() {
                     binding.captureSubStatusLabel.isVisible = !s.subStatusLabel.isNullOrEmpty()
                     binding.resultPanel.isVisible = s.resultVisible
                     binding.resultSummary.text = s.resultSummary
-                    applyPreviewCaptureMask(s)
                     applyOperationLockState(s)
                 }
             }
@@ -513,7 +424,7 @@ class PreviewFragment : Fragment() {
                         val needsRestart = connectionViewModel.getCameraDevice()
                             ?.system?.getSupportConfig()?.getOrNull()
                             ?.supportNewCaptureControlFlow() != true
-                        if (needsRestart && !previewPlayerRestarting) {
+                        if (needsRestart) {
                             captureViewModel.ui.first { !it.busy }
                             val device = connectionViewModel.getCameraDevice() ?: return@collect
                             Timber.d("CaptureFinished video: restart stream")
@@ -528,7 +439,7 @@ class PreviewFragment : Fragment() {
                         // X5 延时录像/移动延时改分辨率后相机侧会自行重启预览流但不回调，延迟兜底重启整条预览流重新同步
                         Timber.d("RecordResolutionChanged: X5 timelapse quirk, schedule fallback stream restart in 1000ms")
                         delay(1000)
-                        if (!isAdded || _binding == null || !previewStarted || previewPlayerRestarting) {
+                        if (!isAdded || _binding == null || !previewStarted) {
                             Timber.d("RecordResolutionChanged: skip fallback restart, state changed")
                             return@collect
                         }
@@ -546,7 +457,6 @@ class PreviewFragment : Fragment() {
         Timber.d("onStart previewStarted=%s", previewStarted)
         lifecycleScope.launch {
             captureViewModel.lockCameraScreen()
-            startPreviewIfNeeded()
         }
     }
 
@@ -586,65 +496,40 @@ class PreviewFragment : Fragment() {
             previewStarted,
         )
         if (!activityStillInteractive) {
-            activePrepareNonce++
-            setPreviewPlayerRestarting(false)
-            stopPreview(releasePlayer = true)
+            stopPreview()
         }
         super.onStop()
     }
 
-    private fun initPreviewPlayer() {
-        if (previewPlayerView != null || _binding == null) return
-        previewPlayerView =
-            InstaCapturePlayerView(requireContext()).also { playerView ->
-                binding.previewPlaceholder.addView(
-                    playerView,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        Gravity.CENTER,
-                    ),
-                )
-            }
-        previewPlayerView?.setLifecycle(this.lifecycle)
-        applyPreviewAspect()
-    }
-
-    private fun startRawFramePipeline() {
-        stopRawFramePipeline()
+    private fun prepareOnDemandFrameCapture() {
+        cancelStillRequest()
         firstRawFrameLogged.set(false)
+        firstEncodedFrameLogged.set(false)
         rawStreamWidth = 0
         rawStreamHeight = 0
         rawVideoEncode = null
-        lastRawStatusUpdateMs = 0L
         LatestCameraFrameStore.clear()
         if (_binding != null) {
             binding.rawFrameStatus.setText(R.string.raw_frame_waiting)
             binding.rawFrameStatus.isVisible = true
         }
+    }
+
+    private fun startStillDecoder(generation: Long) {
+        firstRawFrameLogged.set(false)
         rawFramePipeline =
             RawPreviewFramePipeline(
-                analysisIntervalMs = 100L,
-                onFrame = { frame ->
-                    if (firstRawFrameLogged.compareAndSet(false, true)) {
-                        traceEvent("decoder", "first_frame", code = "${frame.width}x${frame.height}")
-                    }
-                    LatestCameraFrameStore.publish(frame)
-                    touchSceneCoordinator?.offer(frame)
-                    val now = frame.receivedAtElapsedRealtimeMs
-                    if (now - lastRawStatusUpdateMs >= 1_000L) {
-                        lastRawStatusUpdateMs = now
-                        val count = LatestCameraFrameStore.count()
-                        _binding?.rawFrameStatus?.post {
-                            if (_binding == null) return@post
-                            binding.rawFrameStatus.text =
-                                getString(
-                                    R.string.raw_frame_ready_format,
-                                    frame.width,
-                                    frame.height,
-                                    count,
-                                )
-                        }
+                analysisIntervalMs = Long.MAX_VALUE,
+                onFrame = frameHandler@{ frame ->
+                    if (!firstRawFrameLogged.compareAndSet(false, true)) return@frameHandler
+                    traceEvent("decoder", "first_frame", code = "${frame.width}x${frame.height}")
+                    _binding?.root?.post {
+                        if (_binding == null || !stillRequestInFlight || generation != stillRequestGeneration) return@post
+                        stopRawFramePipeline(clearFrameStore = false)
+                        LatestCameraFrameStore.publish(frame)
+                        binding.rawFrameStatus.text =
+                            getString(R.string.raw_frame_ready_format, frame.width, frame.height, LatestCameraFrameStore.count())
+                        touchSceneCoordinator?.analyzeAndFreeze(frame)
                     }
                 },
                 onNeedsKeyFrame = {
@@ -668,9 +553,13 @@ class PreviewFragment : Fragment() {
                                 R.string.raw_frame_error_format,
                                 error.message ?: error.javaClass.simpleName,
                             )
+                        if (stillRequestInFlight && generation == stillRequestGeneration) {
+                            failStillRequest(generation, "DECODER_ERROR")
+                        }
                     }
                 },
             )
+        configureRawFramePipelineIfReady()
     }
 
     private fun configureRawFramePipelineIfReady() {
@@ -681,11 +570,96 @@ class PreviewFragment : Fragment() {
         }.onFailure { Timber.w(it, "configure raw preview frame pipeline") }
     }
 
-    private fun stopRawFramePipeline() {
+    private fun stopRawFramePipeline(clearFrameStore: Boolean = true) {
         rawFramePipeline?.close()
         rawFramePipeline = null
-        LatestCameraFrameStore.clear()
+        if (clearFrameStore) LatestCameraFrameStore.clear()
         hapticRenderer?.cancel()
+    }
+
+    private val livePreviewPlayerListener =
+        object : PlayerViewListener {
+            override fun onLoadingStatusChanged(isLoading: Boolean) {}
+
+            override fun onLoadingFinish() {
+                val device = connectionViewModel.getCameraDevice()
+                val pipeline = livePreviewView?.getPipeline()
+                if (device == null || pipeline == null) {
+                    Timber.w("live preview onLoadingFinish but device or pipeline is null")
+                    return
+                }
+                Timber.d("live preview onLoadingFinish: bind pipeline")
+                device.preview.setPipeline(pipeline)
+                runCatching { device.preview.requestStreamIframe() }
+            }
+
+            override fun onFail(exception: InstaException) {
+                Timber.w(exception, "live preview player onFail")
+            }
+
+            override fun onFirstFrameRendered() {
+                Timber.d("live preview first frame rendered")
+            }
+
+            override fun onReleaseCameraPipeline() {
+                Timber.d("live preview onReleaseCameraPipeline")
+                connectionViewModel.getCameraDevice()?.preview?.setPipeline(null)
+            }
+        }
+
+    private fun initLivePreviewPlayer() {
+        if (livePreviewView != null || _binding == null) return
+        livePreviewView =
+            InstaCapturePlayerView(requireContext()).also { view ->
+                view.setListener(livePreviewPlayerListener)
+                view.setLifecycle(lifecycle)
+                view.setGestureEnabled(false)
+                binding.livePreviewContainer.addView(
+                    view,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+            }
+    }
+
+    /** 与 LiveStreamFragment 同一模式：onOpened 后重建渲染再 play，pipeline 在 onLoadingFinish 绑定。 */
+    private fun prepareLivePreviewPlayer() {
+        initLivePreviewPlayer()
+        val view = livePreviewView ?: return
+        view.post {
+            if (!isAdded || _binding == null) return@post
+            val pv = livePreviewView ?: return@post
+            pv.destroyRender()
+            pv.prepare(PreviewParams())
+            pv.play()
+            latestCameraPosture?.let(::applyLivePreviewRotation)
+            updateLivePreviewVisibility()
+        }
+    }
+
+    /** “调试图层：原图”与实时预览合并：仅 LIVE 且当前图层为原图、流在播时显示 SDK 渲染画面。 */
+    private fun updateLivePreviewVisibility() {
+        val b = _binding ?: return
+        val showLive =
+            previewStarted &&
+                touchSceneCoordinator?.currentSessionState() == TactileSessionState.LIVE &&
+                b.tactileMapView.debugMode == TactileDebugMode.ORIGINAL
+        b.livePreviewContainer.isVisible = showLive
+    }
+
+    private fun releaseLivePreviewPlayer() {
+        val view = livePreviewView ?: return
+        view.setListener(null)
+        view.destroy()
+        _binding?.livePreviewContainer?.removeView(view)
+        livePreviewView = null
+    }
+
+    private fun cancelStillRequest() {
+        stillRequestGeneration++
+        stillRequestInFlight = false
+        touchSceneCoordinator?.cancelPendingStill()
+        stopRawFramePipeline()
     }
 
     private fun setupTouchScene() {
@@ -695,6 +669,16 @@ class PreviewFragment : Fragment() {
         binding.tactileMapView.hapticRenderer = haptics
         binding.tactileMapView.onExplorationStarted = { version ->
             traceEvent("exploration", "touch_started", mapVersion = version)
+        }
+        binding.tactileMapView.onTouchDebug = { px, py, grid, cell, layerValue ->
+            _binding?.let { b ->
+                val counts = touchDebugCounts
+                val gx = grid?.x?.toString() ?: "-"
+                val gy = grid?.y?.toString() ?: "-"
+                b.touchsceneStatus.text =
+                    "touch=(${px.toInt()},${py.toInt()}) grid=($gx,$gy) cell=$cell v=$layerValue " +
+                        "B=${counts.boundary} S=${counts.subject} BG=${counts.background}"
+            }
         }
         binding.mapMoveUpBtn.setOnClickListener { binding.tactileMapView.moveAccessibilityCursor(0, -1) }
         binding.mapMoveDownBtn.setOnClickListener { binding.tactileMapView.moveAccessibilityCursor(0, 1) }
@@ -706,75 +690,54 @@ class PreviewFragment : Fragment() {
                 TactileDebugMode.GRAYSCALE -> R.string.touchscene_debug_grayscale
                 TactileDebugMode.BINARY -> R.string.touchscene_debug_binary
                 TactileDebugMode.EDGE -> R.string.touchscene_debug_edge
+                TactileDebugMode.PHOTO_BINARY -> R.string.touchscene_debug_photo_binary
                 TactileDebugMode.TOUCH_MAP -> R.string.touchscene_debug_touch_map
             }
             binding.debugLayerBtn.setText(label)
+            updateLivePreviewVisibility()
         }
         touchSceneCoordinator =
             TouchSceneCoordinator(
-                describer = MlKitSceneDescriber(requireContext()),
-                onAutomaticDescription = ::onAutomaticSceneDescription,
+                describer = RemoteAiSceneDescriber(
+                    requireContext(),
+                    fallback = MlKitSceneDescriber(requireContext()),
+                ),
+                descriptionTimeoutMs = 10_000L,
             ) { update ->
                 val processedAtMs = SystemClock.elapsedRealtime()
                 _binding?.root?.post {
                     if (_binding == null) return@post
-                    if (update.sessionState == TactileSessionState.LIVE) {
-                        update.debugSnapshot?.source?.let { source ->
-                            performanceMetrics.record(
-                                source.receivedAtElapsedRealtimeMs,
-                                processedAtMs,
-                                SystemClock.elapsedRealtime(),
-                            )
-                        }
+                    update.debugSnapshot?.source?.let { source ->
+                        performanceMetrics.record(
+                            source.receivedAtElapsedRealtimeMs,
+                            processedAtMs,
+                            SystemClock.elapsedRealtime(),
+                        )
                     }
                     renderTouchSceneUpdate(update)
+                    if (stillRequestInFlight && update.sessionState == TactileSessionState.EXPLORING) {
+                        finishStillRequest(update.map)
+                    }
                 }
             }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(requireContext()).also {
             it.setRecognitionListener(buildRecognitionListener())
         }
 
-        binding.freezeMapBtn.setOnClickListener {
-            if (binding.tactileMapView.isFingerExploring) {
-                speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
-                return@setOnClickListener
-            }
-            val map = touchSceneCoordinator?.freeze()
-            if (map == null) {
-                traceEvent("map", "freeze_failed", code = "NO_FRAME")
-                speechOutput?.speak(getString(R.string.touchscene_no_frame))
-            } else {
-                traceEvent("map", "frozen", mapVersion = map.version)
-                binding.tactileMapView.submitMap(map)
-                binding.tactileMapView.explorationEnabled = true
-                binding.freezeMapBtn.isEnabled = false
-                binding.refreshMapBtn.isEnabled = true
-                binding.returnLiveBtn.isEnabled = true
-                binding.tactileMapView.requestFocus()
-                speechOutput?.speak("已冻结触觉地图，可以用手指扫描")
-            }
-        }
+        binding.freezeMapBtn.setOnClickListener { freezeCurrentFrame() }
         binding.refreshMapBtn.setOnClickListener {
             if (binding.tactileMapView.isFingerExploring) {
                 speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
                 return@setOnClickListener
             }
-            val map = touchSceneCoordinator?.refresh()
-            if (map == null) {
-                traceEvent("map", "refresh_unavailable", code = "NO_NEW_FRAME", mapVersion = touchSceneCoordinator?.activeMapVersion())
-                speechOutput?.speak(getString(R.string.touchscene_no_new_frame))
-            } else {
-                traceEvent("map", "refreshed", mapVersion = map.version)
-                binding.tactileMapView.submitMap(map)
-                binding.tactileMapView.explorationEnabled = true
-                speechOutput?.speak("触觉地图已刷新")
-            }
+            requestStillFrame(refresh = true)
         }
         binding.returnLiveBtn.setOnClickListener {
             if (binding.tactileMapView.isFingerExploring) {
                 speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
                 return@setOnClickListener
             }
+            cancelStillRequest()
             hapticRenderer?.cancel()
             val map = touchSceneCoordinator?.leaveExploration()
             traceEvent("map", "returned_live", mapVersion = map?.version)
@@ -792,13 +755,8 @@ class PreviewFragment : Fragment() {
             traceEvent("fallback", "local_demo_frame_requested", fallback = "local_demo")
             binding.rawFrameStatus.setText(R.string.touchscene_local_demo_active)
             binding.captureBtn.isEnabled = false
-            binding.root.post { offerLocalDemoFrame() }
+            binding.streamToggleBtn.isEnabled = false
         }
-    }
-
-    private fun offerLocalDemoFrame() {
-        val now = SystemClock.elapsedRealtime()
-        touchSceneCoordinator?.offer(FakeCameraGateway().frame(FakeContourScene.IRREGULAR, now))
     }
 
     private fun renderTouchSceneUpdate(update: TouchSceneUpdate) {
@@ -811,36 +769,97 @@ class PreviewFragment : Fragment() {
         binding.tactileMapView.submitMap(map)
         binding.tactileMapView.submitDebugSnapshot(update.debugSnapshot)
         binding.tactileMapView.explorationEnabled = update.sessionState != TactileSessionState.LIVE
+        binding.scrollView.gestureInterceptTarget =
+            if (update.sessionState == TactileSessionState.LIVE) null else binding.tactileMapView
+        if (map != null && touchDebugCountsMapVersion != map.version) {
+            touchDebugCounts = computeCounts(map)
+            touchDebugCountsMapVersion = map.version
+        }
         val canExplore = update.sessionState != TactileSessionState.LIVE && map != null
-        binding.freezeMapBtn.isEnabled = update.sessionState == TactileSessionState.LIVE
+        binding.freezeMapBtn.isEnabled = update.sessionState == TactileSessionState.LIVE && !stillRequestInFlight
         binding.returnLiveBtn.isEnabled = update.sessionState != TactileSessionState.LIVE
         binding.mapMoveUpBtn.isEnabled = canExplore
         binding.mapMoveDownBtn.isEnabled = canExplore
         binding.mapMoveLeftBtn.isEnabled = canExplore
         binding.mapMoveRightBtn.isEnabled = canExplore
-        binding.refreshMapBtn.isEnabled = update.sessionState != TactileSessionState.LIVE
+        binding.refreshMapBtn.isEnabled = update.sessionState != TactileSessionState.LIVE && !stillRequestInFlight
         binding.touchsceneStatus.text =
             when (update.sessionState) {
-                TactileSessionState.LIVE ->
-                    getString(
-                        R.string.touchscene_live_map,
-                        when (update.stabilityState) {
-                            StabilityState.MOVING -> "相机移动中"
-                            StabilityState.STABILIZING -> "正在稳定"
-                            StabilityState.STABLE -> "相机稳定"
-                        },
-                    )
+                TactileSessionState.LIVE -> getString(R.string.touchscene_live_map)
                 TactileSessionState.EXPLORING ->
-                    getString(R.string.touchscene_exploring_map, map?.version ?: 0L)
+                    getString(R.string.touchscene_exploring_map, map?.version ?: 0L) +
+                        " · B=${touchDebugCounts.boundary} S=${touchDebugCounts.subject} BG=${touchDebugCounts.background}"
                 TactileSessionState.STALE -> getString(R.string.touchscene_stale_map)
             }
         if (update.sessionState == TactileSessionState.STALE) {
             binding.touchsceneStatus.announceForAccessibility(getString(R.string.touchscene_stale_map))
         }
-        // A stability cue must not interrupt a finger exploring a frozen map.
-        if (update.ready && update.sessionState == TactileSessionState.LIVE) {
-            hapticRenderer?.playReady()
-            speechOutput?.speak(getString(R.string.touchscene_ready))
+        updateLivePreviewVisibility()
+    }
+
+    /** 点击后获取一张新帧，分析完成才进入触觉探索。 */
+    private fun freezeCurrentFrame() {
+        if (binding.tactileMapView.isFingerExploring) {
+            speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
+            return
+        }
+        requestStillFrame(refresh = false)
+    }
+
+    private fun requestStillFrame(refresh: Boolean) {
+        if (stillRequestInFlight) return
+        if (!previewStarted && !localDemoMode) {
+            traceEvent("map", "freeze_failed", code = "STREAM_NOT_STARTED")
+            speechOutput?.speak(getString(R.string.touchscene_stream_not_started))
+            return
+        }
+        stillRequestInFlight = true
+        stillRequestIsRefresh = refresh
+        val generation = ++stillRequestGeneration
+        traceEvent("map", if (refresh) "refresh_requested" else "freeze_requested")
+        binding.freezeMapBtn.isEnabled = false
+        binding.refreshMapBtn.isEnabled = false
+        binding.touchsceneStatus.setText(R.string.touchscene_freezing_frame)
+        if (localDemoMode) {
+            touchSceneCoordinator?.analyzeAndFreeze(
+                FakeCameraGateway().frame(FakeContourScene.IRREGULAR, SystemClock.elapsedRealtime()),
+            )
+        } else {
+            LatestCameraFrameStore.clear()
+            startStillDecoder(generation)
+        }
+        binding.root.postDelayed({
+            if (_binding == null || !stillRequestInFlight || generation != stillRequestGeneration) return@postDelayed
+            failStillRequest(generation, "TIMEOUT")
+        }, 8_000L)
+    }
+
+    private fun failStillRequest(generation: Long, code: String) {
+        if (!stillRequestInFlight || generation != stillRequestGeneration) return
+        cancelStillRequest()
+        binding.freezeMapBtn.isEnabled = touchSceneCoordinator?.currentSessionState() == TactileSessionState.LIVE
+        binding.refreshMapBtn.isEnabled = touchSceneCoordinator?.currentSessionState() != TactileSessionState.LIVE
+        binding.touchsceneStatus.setText(R.string.touchscene_no_frame)
+        traceEvent("map", "freeze_failed", code = code)
+        speechOutput?.speak(getString(R.string.touchscene_no_frame))
+    }
+
+    private fun finishStillRequest(map: TactileMap?) {
+        if (map == null) return
+        val refreshed = stillRequestIsRefresh
+        stillRequestInFlight = false
+        stillRequestGeneration++
+        traceEvent("map", if (refreshed) "refreshed" else "frozen", mapVersion = map.version)
+        binding.refreshMapBtn.isEnabled = true
+        binding.returnLiveBtn.isEnabled = true
+        binding.tactileMapView.explorationEnabled = true
+        binding.scrollView.gestureInterceptTarget = binding.tactileMapView
+        binding.tactileMapView.requestFocus()
+        if (refreshed) {
+            speechOutput?.speak("触觉地图已刷新")
+        } else {
+            speechOutput?.speak("已冻结当前画面，正在识别画面内容")
+            describeLatestScene()
         }
     }
 
@@ -861,23 +880,8 @@ class PreviewFragment : Fragment() {
                     traceEvent("description", "completed", fallback = description.source)
                     binding.touchsceneStatus.text = description.text
                     speechOutput?.speak(description.text)
-                    automaticScenePolicy.markAnnounced(description, SystemClock.elapsedRealtime())
                 }
             }
-        }
-    }
-
-    private fun onAutomaticSceneDescription(description: SceneDescription) {
-        _binding?.root?.post {
-            if (_binding == null || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return@post
-            if (touchSceneCoordinator?.isCurrentAutomaticDescription(description) != true) return@post
-            if (lastTracedSessionState != TactileSessionState.LIVE || manualDescriptionPending ||
-                voiceTurnGate.isListening() || speechOutput?.canSpeak() != true ||
-                speechOutput?.isSpeaking() == true) return@post
-            val nowMs = SystemClock.elapsedRealtime()
-            if (!automaticScenePolicy.shouldAnnounce(description, nowMs)) return@post
-            speechOutput?.speak(description.text)
-            traceEvent("description", "auto_announced", fallback = description.source)
         }
     }
 
@@ -949,13 +953,41 @@ class PreviewFragment : Fragment() {
     private fun dispatchVoiceCommand(command: VoiceCommand) {
         when (command) {
             VoiceCommand.TakePhoto -> switchModeAndCapture(FunctionMode.PHOTO_NORMAL, stop = false)
-            VoiceCommand.StartRecording -> switchModeAndCapture(FunctionMode.VIDEO_NORMAL, stop = false)
-            VoiceCommand.StopRecording -> switchModeAndCapture(FunctionMode.VIDEO_NORMAL, stop = true)
+            VoiceCommand.StartStream -> startStreamByUser()
+            VoiceCommand.StopStream -> stopStreamByUser()
+            VoiceCommand.FreezeFrame -> freezeCurrentFrame()
+            VoiceCommand.ReturnLive -> binding.returnLiveBtn.performClick()
             VoiceCommand.DescribeScene -> describeLatestScene()
             VoiceCommand.Repeat -> if (speechOutput?.repeatLast() != true) speechOutput?.speak(getString(R.string.touchscene_no_frame))
             VoiceCommand.Help -> speechOutput?.speak(getString(R.string.touchscene_help))
             is VoiceCommand.Unknown -> speechOutput?.speak(getString(R.string.touchscene_unknown_command))
         }
+    }
+
+    private fun startStreamByUser() {
+        if (localDemoMode || connectionViewModel.getCameraDevice() == null) {
+            traceEvent("preview", "start_rejected", code = "NO_CAMERA", fallback = if (localDemoMode) "local_demo" else null)
+            val message = getString(R.string.touchscene_stream_requires_camera)
+            binding.touchsceneStatus.text = message
+            speechOutput?.speak(message)
+            return
+        }
+        if (previewStarted) {
+            speechOutput?.speak(getString(R.string.touchscene_stream_started))
+            return
+        }
+        speechOutput?.speak(getString(R.string.touchscene_stream_starting))
+        startPreviewIfNeeded()
+    }
+
+    private fun stopStreamByUser() {
+        if (!previewStarted) {
+            speechOutput?.speak(getString(R.string.touchscene_stream_not_started))
+            return
+        }
+        hapticRenderer?.cancel()
+        stopPreview()
+        speechOutput?.speak(getString(R.string.touchscene_stream_stopped))
     }
 
     private fun switchModeAndCapture(mode: FunctionMode, stop: Boolean) {
@@ -969,7 +1001,7 @@ class PreviewFragment : Fragment() {
         traceEvent("capture", "requested", code = if (stop) "voice_stop" else "voice_start")
         viewLifecycleOwner.lifecycleScope.launch {
             val current = captureViewModel.ui.value
-            if (current.busy || current.captureCommand != null || previewPlayerRestarting) {
+            if (current.busy || current.captureCommand != null) {
                 speechOutput?.speak(getString(R.string.touchscene_capture_unavailable))
                 return@launch
             }
@@ -1019,11 +1051,9 @@ class PreviewFragment : Fragment() {
         }
         Timber.d("startPreviewIfNeeded -> init + startStream")
         traceEvent("preview", "start_requested")
-        binding.previewPlaceholderText.setText(R.string.realtime_preview_window)
-        binding.previewPlaceholderText.isVisible = true
-        initPreviewPlayer()
-        startRawFramePipeline()
+        prepareOnDemandFrameCapture()
         runCatching {
+            device.preview.setPipeline(null)
             device.preview.init(requireActivity().application)
             device.preview.registerCameraStreamListener(streamListener)
             device.preview.registerPostureListener(touchScenePostureListener)
@@ -1034,9 +1064,9 @@ class PreviewFragment : Fragment() {
             previewStarted = false
             stopCameraStreamBestEffort(device)
             stopRawFramePipeline()
-            releasePreviewPlayer()
             Timber.w(it, "start preview stream")
         }
+        updateStreamToggleLabel()
     }
 
     /** An SDK cleanup failure must not skip the remaining release steps. */
@@ -1050,8 +1080,8 @@ class PreviewFragment : Fragment() {
         )
     }
 
-    private fun stopPreview(releasePlayer: Boolean) {
-        Timber.d("stopPreview releasePlayer=%s previewStarted=%s", releasePlayer, previewStarted)
+    private fun stopPreview() {
+        Timber.d("stopPreview previewStarted=%s", previewStarted)
         if (previewStarted) traceEvent("preview", "stop_requested")
         val device = connectionViewModel.getCameraDevice()
         if (device != null && previewStarted) {
@@ -1060,36 +1090,17 @@ class PreviewFragment : Fragment() {
             runCatching { device?.preview?.setPipeline(null) }
                 .onFailure { Timber.w(it, "unbind inactive preview pipeline") }
         }
-        stopRawFramePipeline()
+        cancelStillRequest()
         previewStarted = false
         traceEvent("preview", "stopped")
-        if (_binding != null) {
-            binding.previewPlaceholderText.isVisible = true
-        }
-        if (releasePlayer) {
-            releasePreviewPlayer()
-        }
+        updateStreamToggleLabel()
     }
 
-    private fun releasePreviewPlayer() {
-        val playerView = previewPlayerView ?: return
-        Timber.d("releasePreviewPlayer")
-        activePrepareNonce++
-        playerView.setListener(null)
-        playerView.destroy()
-        if (_binding != null) {
-            binding.previewPlaceholder.removeView(playerView)
-        }
-        previewPlayerView = null
-    }
-
-    private fun restartPreviewPlayer() {
-        val playerView = previewPlayerView ?: return
-        if (_binding == null || !previewStarted) return
-        Timber.d("restartPreviewPlayer -> prepare")
-        setPreviewPlayerRestarting(true)
-        playerView.destroyRender()
-        playerView.post { prepareAndPlayPreview(playerView) }
+    private fun updateStreamToggleLabel() {
+        _binding?.streamToggleBtn?.setText(
+            if (previewStarted) R.string.touchscene_stream_stop else R.string.touchscene_stream_start,
+        )
+        updateLivePreviewVisibility()
     }
 
     private fun onLensChipSelected(mode: SensorMode) {
@@ -1117,7 +1128,8 @@ class PreviewFragment : Fragment() {
     }
 
     /**
-     * 切镜头/切模式统一入口：由 [PreviewRefreshStrategyDecider] 根据 action + 当前模式 + 设备型号选定策略。
+     * 切镜头/切模式统一入口：无预览播放器后，REBUILD_PLAYER 退化为纯 SDK 切换，
+     * 只有 RESTART_STREAM 需要完整重启流。
      */
     private suspend fun executePreviewSwitch(action: PreviewSwitchAction): Boolean {
         val device = connectionViewModel.getCameraDevice() ?: return false
@@ -1143,11 +1155,9 @@ class PreviewFragment : Fragment() {
                 doRestartStream(device, action.sdkSwitch)
             }
 
-            PreviewRefreshStrategy.REBUILD_PLAYER -> {
-                doRebuildPlayer(device, action.sdkSwitch)
-            }
-
-            PreviewRefreshStrategy.NO_OP -> {
+            PreviewRefreshStrategy.REBUILD_PLAYER,
+            PreviewRefreshStrategy.NO_OP,
+            -> {
                 runPreviewSdkSwitch(action.sdkSwitch, ::reportPreviewSwitchFailure)
             }
         }
@@ -1168,37 +1178,9 @@ class PreviewFragment : Fragment() {
         }
     }
 
-    /** 解绑 pipeline → 切 SDK → 重新 prepare，不停 stream。 */
-    private suspend fun doRebuildPlayer(
-        device: CameraDevice,
-        switchSdk: suspend () -> Boolean,
-    ): Boolean {
-        val playerView = previewPlayerView ?: return false
-        if (_binding == null || !previewStarted) return false
-
-        activePrepareNonce++
-        setPreviewPlayerRestarting(true)
-        Timber.d("doRebuildPlayer: unbind pipeline nonce=%d", activePrepareNonce)
-        runCatching { device.preview.setPipeline(null) }.onFailure {
-            Timber.w(it, "preview setPipeline null before lens/mode switch")
-        }
-
-        val switched = runPreviewSdkSwitch(switchSdk, ::reportPreviewSwitchFailure)
-        Timber.d("doRebuildPlayer: sdkSwitch result=%s", switched)
-        if (!isAdded || _binding == null || !previewStarted) {
-            Timber.d("doRebuildPlayer: abort after sdkSwitch")
-            setPreviewPlayerRestarting(false)
-            return false
-        }
-        playerView.destroyRender()
-        playerView.post { prepareAndPlayPreview(playerView) }
-        return switched
-    }
-
     /**
      * 完整重启 SDK 预览流，让底层重协商分辨率/帧率/解码器。
-     * 顺序：失效旧 nonce → 解绑 pipeline → unregister → stopStream → 切 SDK → register → startStream，
-     * 后续 prepare 由 [streamListener]onOpened 自动触发。
+     * 顺序：解绑 pipeline → unregister → stopStream → 切 SDK → register → startStream。
      */
     private suspend fun doRestartStream(
         device: CameraDevice,
@@ -1206,13 +1188,8 @@ class PreviewFragment : Fragment() {
     ): Boolean {
         if (_binding == null || !previewStarted) return false
 
-        activePrepareNonce++
-        setPreviewPlayerRestarting(true)
-        binding.previewPlaceholderText.setText(R.string.realtime_preview_window)
-        binding.previewPlaceholderText.isVisible = true
-
         stopCameraStreamBestEffort(device)
-        stopRawFramePipeline()
+        cancelStillRequest()
         previewStarted = false
         Timber.d("doRestartStream: stream stopped")
 
@@ -1220,13 +1197,13 @@ class PreviewFragment : Fragment() {
         Timber.d("doRestartStream: sdkSwitch result=%s", switched)
 
         if (!isAdded || _binding == null) {
-            setPreviewPlayerRestarting(false)
             Timber.d("doRestartStream: abort after sdkSwitch")
             return false
         }
-        startRawFramePipeline()
+        prepareOnDemandFrameCapture()
         var streamStarted = false
         runCatching {
+            device.preview.setPipeline(null)
             device.preview.init(requireActivity().application)
             device.preview.registerCameraStreamListener(streamListener)
             device.preview.registerPostureListener(touchScenePostureListener)
@@ -1238,70 +1215,10 @@ class PreviewFragment : Fragment() {
             previewStarted = false
             stopCameraStreamBestEffort(device)
             stopRawFramePipeline()
-            setPreviewPlayerRestarting(false)
             Timber.w(it, "restart preview stream after lens switch")
         }
+        updateStreamToggleLabel()
         return switched && streamStarted
-    }
-
-    private fun prepareAndPlayPreview(playerView: InstaCapturePlayerView) {
-        if (!isAdded || _binding == null) {
-            setPreviewPlayerRestarting(false)
-            Timber.d("prepareAndPlayPreview abort: not added or no binding")
-            return
-        }
-        activePrepareNonce++
-        val expect = activePrepareNonce
-        restartStableExpect = expect
-        restartStablePipelineBound = false
-        restartStableFirstFrame = false
-        Timber.d(
-            "prepareAndPlayPreview wxh=%sx%s fps=%s lens=%s",
-            previewWidth,
-            previewHeight,
-            previewFps,
-            captureViewModel.ui.value.selectedLens,
-        )
-        playerView.setListener(buildPlayerViewListener(expect))
-        selectedLensMode = captureViewModel.ui.value.selectedLens
-        playerView.prepare(
-            PreviewParams(
-                width = previewWidth,
-                height = previewHeight,
-                fps = previewFps,
-                isGestureEnabled = isPanoramaDualLensPreview(),
-                // renderModel 只能通过 prepare 传入，重启后必须重新下发缓存值
-                renderModel = if (isPanoramaDualLensPreview()) selectedPreviewRenderModel else null,
-            ),
-        )
-        playerView.play()
-    }
-
-    private fun applyPreviewAspect() {
-        val playerView = previewPlayerView ?: return
-        if (_binding == null) return
-        val container = binding.previewPlaceholder
-        val containerWidth = container.width
-        if (containerWidth <= 0) return
-
-        val videoWidth = previewWidth.coerceAtLeast(1)
-        val videoHeight = previewHeight.coerceAtLeast(1)
-        val targetHeight =
-            (containerWidth / (videoWidth.toFloat() / videoHeight.toFloat()))
-                .toInt()
-                .coerceAtLeast(1)
-        val layoutParams =
-            (playerView.layoutParams as? FrameLayout.LayoutParams)
-                ?: FrameLayout.LayoutParams(containerWidth, targetHeight, Gravity.CENTER)
-        if (layoutParams.width != containerWidth || layoutParams.height != targetHeight || layoutParams.gravity != Gravity.CENTER) {
-            layoutParams.width = containerWidth
-            layoutParams.height = targetHeight
-            layoutParams.gravity = Gravity.CENTER
-            playerView.layoutParams = layoutParams
-        }
-        if (binding.previewCaptureMask.isVisible) {
-            sizePreviewCaptureMaskToPlayer()
-        }
     }
 
     private fun rebuildLensChips(
@@ -1334,13 +1251,12 @@ class PreviewFragment : Fragment() {
             )
     }
 
-    /** 全局 busy 或播放器重启时禁用全部次要入口；拍摄流程中也禁止切镜头/模式。 */
+    /** 全局 busy 时禁用全部次要入口；拍摄流程中也禁止切镜头/模式。 */
     private fun applySecondaryInteractionLock(locked: Boolean) {
         val alpha = if (locked) 0.45f else 1f
         listOf(
             binding.backLink,
             binding.openModeParamsSheet,
-            binding.openPreviewParamsSheet,
         ).forEach {
             it.isEnabled = !locked
             it.alpha = alpha
@@ -1349,363 +1265,13 @@ class PreviewFragment : Fragment() {
         CaptureChips.setInteractionLocked(binding.modeChipContainer, locked)
     }
 
-    private fun setPreviewPlayerRestarting(restarting: Boolean) {
-        if (previewPlayerRestarting == restarting) return
-        previewPlayerRestarting = restarting
-        if (_binding == null) return
-        currentUiState?.let(::applyOperationLockState)
-    }
-
-    /** 拍摄中且当前模式不支持实时预览时，用不透明遮罩盖住预览画面。 */
-    private fun applyPreviewCaptureMask(s: CameraCaptureUiState) {
-        val maskWhileCapturing =
-            s.captureFlowActive && !PreviewCapability.supportsPreviewWhileCapturing(s.selectedMode)
-        if (maskWhileCapturing) {
-            // wrap_content 容器内 match_parent 子 View 不会被撑满，显式对齐到 player 尺寸
-            sizePreviewCaptureMaskToPlayer()
-            if (!binding.previewCaptureMask.isVisible) {
-                // player 由 addView 动态追加，z 序在 XML 子节点之上，需提前置顶才能盖住
-                binding.previewCaptureMask.bringToFront()
-            }
-        }
-        binding.previewCaptureMask.isVisible = maskWhileCapturing
-    }
-
-    /** 遮罩尺寸跟随 player（与 [applyPreviewAspect] 计算出的预览区一致）。 */
-    private fun sizePreviewCaptureMaskToPlayer() {
-        if (_binding == null) return
-        val mask = binding.previewCaptureMask
-        val player = previewPlayerView
-        val w = player?.width?.takeIf { it > 0 } ?: binding.previewPlaceholder.width
-        val h = player?.height?.takeIf { it > 0 } ?: binding.previewPlaceholder.height
-        if (w <= 0 || h <= 0) return
-        val lp =
-            (mask.layoutParams as? FrameLayout.LayoutParams)
-                ?: FrameLayout.LayoutParams(w, h, Gravity.CENTER)
-        if (lp.width != w || lp.height != h || lp.gravity != Gravity.CENTER) {
-            lp.width = w
-            lp.height = h
-            lp.gravity = Gravity.CENTER
-            mask.layoutParams = lp
-        }
-    }
-
     private fun applyOperationLockState(s: CameraCaptureUiState) {
         // 拍摄命令在途（开始/停止过渡期）同样触发全屏遮罩与交互锁
-        val operationLocked = s.busy || previewPlayerRestarting || s.captureCommand != null
+        val operationLocked = s.busy || s.captureCommand != null
         binding.blockingOverlay.isVisible = operationLocked
         binding.blockingOverlay.setText(s.loadingText?:"")
         binding.captureBtn.isEnabled = s.captureButtonEnabled && !operationLocked
         applySecondaryInteractionLock(operationLocked || s.captureFlowActive)
-    }
-
-    fun previewParamRowsForSheet(): List<CaptureParamRow> {
-        val appContext = requireContext()
-        val resolutionOptions = PreviewResolutionPreset.entries
-        val resolutionSelected =
-            resolutionOptions.indexOf(selectedPreviewResolutionPreset).coerceAtLeast(0)
-        val stabSelected =
-            STAB_TYPE_OPTIONS.indexOfFirst { it.value == selectedStabType }.coerceAtLeast(0)
-        return buildList<CaptureParamRow> {
-            add(
-                previewParamRow(
-                    key = PREVIEW_PARAM_KEY_RESOLUTION,
-                    labelResId = R.string.preview_param_resolution,
-                    optionLabels = resolutionOptions.map { appContext.getString(it.labelResId) },
-                    optionValues = resolutionOptions,
-                    selectedIndex = resolutionSelected,
-                ),
-            )
-            if (isPanoramaDualLensPreview()) {
-                val projectionSelected =
-                    PROJECTION_OPTIONS
-                        .indexOfFirst { it.value == selectedPreviewRenderModel }
-                        .coerceAtLeast(0)
-                add(
-                    previewParamRow(
-                        key = PREVIEW_PARAM_KEY_PROJECTION,
-                        labelResId = R.string.preview_param_projection_mode,
-                        optionLabels = PROJECTION_OPTIONS.map { it.text },
-                        optionValues = PROJECTION_OPTIONS.map { it.value },
-                        selectedIndex = projectionSelected,
-                    ),
-                )
-            }
-            add(
-                previewParamRow(
-                    key = PREVIEW_PARAM_KEY_STAB,
-                    labelResId = R.string.preview_param_stab_type,
-                    optionLabels = STAB_TYPE_OPTIONS.map { appContext.getString(it.textId) },
-                    optionValues = STAB_TYPE_OPTIONS.map { it.value },
-                    selectedIndex = stabSelected,
-                ),
-            )
-            if (isPanoramaDualLensPreview() && isOffsetTypeSupported()) {
-                val offsetSelected =
-                    OFFSET_TYPE_OPTIONS
-                        .indexOfFirst { it.value == selectedOffsetType }
-                        .coerceAtLeast(0)
-                add(
-                    previewParamRow(
-                        key = PREVIEW_PARAM_KEY_OFFSET,
-                        labelResId = R.string.preview_param_offset_type,
-                        optionLabels = OFFSET_TYPE_OPTIONS.map { appContext.getString(it.textId) },
-                        optionValues = OFFSET_TYPE_OPTIONS.map { it.value },
-                        selectedIndex = offsetSelected,
-                    ),
-                )
-            }
-            if (isPanoramaDualLensPreview()) {
-                add(
-                    previewParamRow(
-                        key = PREVIEW_PARAM_KEY_DYNAMIC_STITCH,
-                        labelResId = R.string.player_setting_dynamic_stitch,
-                        optionLabels = BOOLEAN_OPTIONS.map { appContext.getString(it.textId) },
-                        optionValues = BOOLEAN_OPTIONS.map { it.value },
-                        selectedIndex = if (selectedDynamicStitch) 1 else 0,
-                    ),
-                )
-            }
-            add(
-                previewParamRow(
-                    key = PREVIEW_PARAM_KEY_DE_PURPLE_FILTER,
-                    labelResId = R.string.player_setting_de_purple_filter,
-                    optionLabels = BOOLEAN_OPTIONS.map { appContext.getString(it.textId) },
-                    optionValues = BOOLEAN_OPTIONS.map { it.value },
-                    selectedIndex = if (selectedDePurpleFilter) 1 else 0,
-                ),
-            )
-            add(
-                previewParamRow(
-                    key = PREVIEW_PARAM_KEY_COLOR_PLUS,
-                    labelResId = R.string.player_setting_color_plus,
-                    optionLabels = BOOLEAN_OPTIONS.map { appContext.getString(it.textId) },
-                    optionValues = BOOLEAN_OPTIONS.map { it.value },
-                    selectedIndex = if (selectedColorPlus) 1 else 0,
-                ),
-            )
-            if (selectedColorPlus) {
-                add(
-                    previewParamRow(
-                        key = PREVIEW_PARAM_KEY_COLOR_PLUS_INTENSITY,
-                        labelResId = R.string.player_setting_color_plus_intensity,
-                        optionLabels = COLOR_PLUS_INTENSITY_OPTIONS.map { it.text },
-                        optionValues = COLOR_PLUS_INTENSITY_OPTIONS.map { it.value },
-                        selectedIndex =
-                            selectedColorPlusIntensityIndex.coerceIn(
-                                0,
-                                COLOR_PLUS_INTENSITY_OPTIONS.size - 1,
-                            ),
-                    ),
-                )
-            }
-            if (isPanoramaDualLensPreview()) {
-                add(
-                    previewParamRow(
-                        key = PREVIEW_PARAM_KEY_IMAGE_FUSION,
-                        labelResId = R.string.player_setting_color_fusion,
-                        optionLabels = BOOLEAN_OPTIONS.map { appContext.getString(it.textId) },
-                        optionValues = BOOLEAN_OPTIONS.map { it.value },
-                        selectedIndex = if (selectedImageFusion) 1 else 0,
-                    ),
-                )
-            }
-        }
-    }
-
-    private fun previewParamRow(
-        key: String,
-        labelResId: Int,
-        optionLabels: List<String>,
-        optionValues: List<Any>,
-        selectedIndex: Int,
-    ): CaptureParamRow =
-        CaptureParamRow(
-            key = key,
-            displayLabel = getString(labelResId),
-            optionLabels = optionLabels,
-            optionValues = optionValues,
-            selectedIndex = selectedIndex,
-        )
-
-    fun onPreviewParamSelectionChanged(
-        rowKey: String,
-        index: Int,
-    ) {
-        when (rowKey) {
-            PREVIEW_PARAM_KEY_RESOLUTION -> {
-                val options = PreviewResolutionPreset.entries
-                if (index !in options.indices) return
-                selectedPreviewResolutionPreset = options[index]
-                Timber.d("resolution preset -> %s previewStarted=%s", selectedPreviewResolutionPreset, previewStarted)
-                applyPreviewResolution(previewPlayerView ?: return)
-                refreshPreviewParamsBottomSheet()
-                return
-            }
-
-            PREVIEW_PARAM_KEY_PROJECTION -> {
-                if (!isPanoramaDualLensPreview()) return
-                if (index !in PROJECTION_OPTIONS.indices) return
-                val newRenderModel = PROJECTION_OPTIONS[index].value
-                if (newRenderModel == selectedPreviewRenderModel) return
-                selectedPreviewRenderModel = newRenderModel as RenderModel
-                Timber.d("projection changed -> %s", newRenderModel)
-                restartPreviewPlayer()
-                return
-            }
-
-            PREVIEW_PARAM_KEY_STAB -> {
-                val options = STAB_TYPE_OPTIONS
-                if (index !in options.indices) return
-                selectedStabType = options[index].value as StabType
-                Timber.d("stabType -> %s", selectedStabType)
-                previewPlayerView?.setStabType(selectedStabType)
-                refreshPreviewParamsBottomSheet()
-                return
-            }
-
-            PREVIEW_PARAM_KEY_OFFSET -> {
-                // 与 BottomSheet 行显示条件及原写回逻辑保持一致：NANO_S 等不支持 offset 的机型不下发
-                if (!isPanoramaDualLensPreview() || !isOffsetTypeSupported()) return
-                val options = OFFSET_TYPE_OPTIONS
-                if (index !in options.indices) return
-                selectedOffsetType = options[index].value as OffsetType
-                Timber.d("offsetType -> %s", selectedOffsetType)
-                previewPlayerView?.setOffsetType(selectedOffsetType)
-                refreshPreviewParamsBottomSheet()
-                return
-            }
-
-            PREVIEW_PARAM_KEY_DYNAMIC_STITCH -> {
-                if (!isPanoramaDualLensPreview()) return
-                val value = BOOLEAN_OPTIONS[index.coerceIn(0, 1)].value as Boolean
-                if (value == selectedDynamicStitch) return
-                selectedDynamicStitch = value
-                Timber.d("dynamicStitch -> %s", value)
-                previewPlayerView?.setDynamicStitchEnabled(value)
-                return
-            }
-
-            PREVIEW_PARAM_KEY_DE_PURPLE_FILTER -> {
-                val value = BOOLEAN_OPTIONS[index.coerceIn(0, 1)].value as Boolean
-                if (value == selectedDePurpleFilter) return
-                selectedDePurpleFilter = value
-                Timber.d("dePurpleFilter -> %s", value)
-                previewPlayerView?.setDePurpleFilterEnable(value)
-                return
-            }
-
-            PREVIEW_PARAM_KEY_COLOR_PLUS -> {
-                val value = BOOLEAN_OPTIONS[index.coerceIn(0, 1)].value as Boolean
-                if (value == selectedColorPlus) return
-                selectedColorPlus = value
-                Timber.d("colorPlus -> %s", value)
-                previewPlayerView?.setColorPlusEnabled(value)
-                if (value) {
-                    val intensity =
-                        COLOR_PLUS_INTENSITY_OPTIONS[
-                            selectedColorPlusIntensityIndex.coerceIn(
-                                0,
-                                COLOR_PLUS_INTENSITY_OPTIONS.size - 1,
-                            ),
-                        ].value as Float
-                    previewPlayerView?.setColorPlusFilterIntensity(intensity)
-                }
-                refreshPreviewParamsBottomSheet()
-                return
-            }
-
-            PREVIEW_PARAM_KEY_COLOR_PLUS_INTENSITY -> {
-                if (index !in COLOR_PLUS_INTENSITY_OPTIONS.indices) return
-                selectedColorPlusIntensityIndex = index
-                if (selectedColorPlus) {
-                    val intensity = COLOR_PLUS_INTENSITY_OPTIONS[index].value as Float
-                    Timber.d("colorPlusIntensity -> %s", intensity)
-                    previewPlayerView?.setColorPlusFilterIntensity(intensity)
-                }
-                return
-            }
-
-            PREVIEW_PARAM_KEY_IMAGE_FUSION -> {
-                if (!isPanoramaDualLensPreview()) return
-                val value = BOOLEAN_OPTIONS[index.coerceIn(0, 1)].value as Boolean
-                if (value == selectedImageFusion) return
-                selectedImageFusion = value
-                Timber.d("imageFusion -> %s", value)
-                previewPlayerView?.setColorFusionEnabled(value)
-                return
-            }
-
-            else -> {
-                return
-            }
-        }
-    }
-
-    private fun refreshPreviewParamsBottomSheet() {
-        (childFragmentManager.findFragmentByTag(PreviewParamsBottomSheetFragment.TAG) as? PreviewParamsBottomSheetFragment)
-            ?.refreshRows()
-    }
-
-    private fun syncRenderParamsFromPlayer(playerView: InstaCapturePlayerView) {
-        runCatching {
-            selectedDynamicStitch = playerView.isDynamicStitchEnabled()
-            selectedDePurpleFilter = playerView.getDePurpleFilterEnable()
-            selectedColorPlus = playerView.isColorPlusEnabled()
-            val currentIntensity = playerView.getColorPlusFilterIntensity()
-            selectedColorPlusIntensityIndex =
-                COLOR_PLUS_INTENSITY_OPTIONS
-                    .indexOfFirst { (it.value as Float) == currentIntensity }
-                    .coerceAtLeast(0)
-            selectedImageFusion = playerView.isColorFusionEnabled()
-            // PlayerView 无对应 getter，重置为 SDK 默认值与 PlayerView 实际状态保持一致
-            selectedStabType = StabType.AUTO
-            selectedOffsetType = OffsetType.ORIGINAL
-            selectedPreviewResolutionPreset = PreviewResolutionPreset.ORIGINAL
-            Timber.d(
-                "syncRenderParams: dynStitch=%s dePurple=%s colorPlus=%s intensity=%s fusion=%s stab=%s offset=%s",
-                selectedDynamicStitch,
-                selectedDePurpleFilter,
-                selectedColorPlus,
-                selectedColorPlusIntensityIndex,
-                selectedImageFusion,
-                selectedStabType,
-                selectedOffsetType,
-            )
-        }.onFailure { Timber.w(it, "syncRenderParamsFromPlayer failed") }
-    }
-
-    private fun applyPreviewResolution(playerView: InstaCapturePlayerView) {
-        val w = selectedPreviewResolutionPreset.width ?: streamDefaultPreviewWidth
-        val h = selectedPreviewResolutionPreset.height ?: streamDefaultPreviewHeight
-        if (w <= 0 || h <= 0) return
-        Timber.d("applyPreviewResolution preset=%s wxh=%sx%s", selectedPreviewResolutionPreset, w, h)
-        playerView.setPreviewResolution(w, h)
-        if (previewWidth != w || previewHeight != h) {
-            previewWidth = w
-            previewHeight = h
-            applyPreviewAspect()
-        }
-    }
-
-    private fun applyPreviewGestureAvailability(playerView: InstaCapturePlayerView?) {
-        playerView?.let {
-            val enabled = isPanoramaDualLensPreview()
-            it.setGestureEnabled(enabled)
-            it.setGestureHorizontalEnabled(enabled)
-            it.setGestureVerticalEnabled(enabled)
-            it.setGestureZoomEnabled(enabled)
-        }
-        binding.scrollView.gestureInterceptTarget =
-            if (isPanoramaDualLensPreview()) binding.previewPlaceholder else null
-    }
-
-    private fun isPanoramaDualLensPreview(): Boolean = selectedLensMode == SensorMode.ALL
-
-    private fun isOffsetTypeSupported(): Boolean {
-        val cameraType = connectionViewModel.getCameraDevice()
-            ?.system?.getCameraType()?.getOrNull() ?: return false
-        return cameraType != CameraType.NANO_S
     }
 
     /**
@@ -1724,8 +1290,8 @@ class PreviewFragment : Fragment() {
     override fun onDestroyView() {
         Timber.d("onDestroyView")
         voiceTurnGate.reset()
-        activePrepareNonce++
-        stopPreview(releasePlayer = true)
+        stopPreview()
+        releaseLivePreviewPlayer()
         speechRecognizer?.destroy()
         speechRecognizer = null
         speechOutput?.close()
@@ -1734,35 +1300,11 @@ class PreviewFragment : Fragment() {
         touchSceneCoordinator = null
         hapticRenderer?.cancel()
         hapticRenderer = null
-        binding.previewPlaceholder.removeOnLayoutChangeListener(previewLayoutChangeListener)
-        binding.previewPlaceholder.removeAllViews()
         traceEvent("session", "view_destroyed")
         flushTrace()
         traceIo?.shutdown()
         traceIo = null
         super.onDestroyView()
         _binding = null
-    }
-
-    private enum class PreviewResolutionPreset(
-        val labelResId: Int,
-        val width: Int?,
-        val height: Int?,
-    ) {
-        ORIGINAL(R.string.preview_resolution_original, null, null),
-        RESOLUTION_1080P(R.string.preview_resolution_1080p, 1920, 1080),
-        RESOLUTION_720P(R.string.preview_resolution_720p, 1280, 720),
-    }
-
-    companion object {
-        private const val PREVIEW_PARAM_KEY_RESOLUTION = "preview_resolution"
-        private const val PREVIEW_PARAM_KEY_PROJECTION = "preview_projection_mode"
-        private const val PREVIEW_PARAM_KEY_STAB = "preview_stab_type"
-        private const val PREVIEW_PARAM_KEY_OFFSET = "preview_offset_type"
-        private const val PREVIEW_PARAM_KEY_DYNAMIC_STITCH = "preview_dynamic_stitch"
-        private const val PREVIEW_PARAM_KEY_DE_PURPLE_FILTER = "preview_de_purple_filter"
-        private const val PREVIEW_PARAM_KEY_COLOR_PLUS = "preview_color_plus"
-        private const val PREVIEW_PARAM_KEY_COLOR_PLUS_INTENSITY = "preview_color_plus_intensity"
-        private const val PREVIEW_PARAM_KEY_IMAGE_FUSION = "preview_image_fusion"
     }
 }

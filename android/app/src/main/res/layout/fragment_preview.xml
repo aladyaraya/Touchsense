@@ -36,50 +36,6 @@
                     android:textSize="15sp" />
             </LinearLayout>
 
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/preview_card"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
-
-                <FrameLayout
-                    android:id="@+id/preview_placeholder"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@color/demo_divider">
-
-                    <TextView
-                        android:id="@+id/preview_placeholder_text"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="center"
-                        android:gravity="center"
-                        android:minHeight="200dp"
-                        android:text="@string/realtime_preview_window"
-                        android:textColor="@color/demo_secondary_text" />
-
-                    <FrameLayout
-                        android:id="@+id/preview_capture_mask"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:background="@color/demo_divider"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:visibility="gone">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_gravity="center"
-                            android:gravity="center"
-                            android:text="@string/capture_preview_unsupported_while_capturing"
-                            android:textColor="@color/demo_secondary_text" />
-                    </FrameLayout>
-                </FrameLayout>
-            </com.google.android.material.card.MaterialCardView>
-
             <TextView
                 android:id="@+id/raw_frame_status"
                 android:layout_width="match_parent"
@@ -90,6 +46,13 @@
                 android:text="@string/raw_frame_waiting"
                 android:textColor="@color/demo_secondary_text"
                 android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/stream_toggle_btn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/touchscene_stream_start" />
 
             <TextView
                 style="@style/DemoSectionTitle"
@@ -113,13 +76,26 @@
                 android:layout_marginBottom="8dp"
                 android:text="@string/touchscene_debug_touch_map" />
 
-            <com.insta360.kmpsdk.demo.touchscene.TactileMapView
-                android:id="@+id/tactile_map_view"
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="240dp"
-                android:contentDescription="@string/touchscene_map_content_description"
-                android:focusable="true"
-                android:importantForAccessibility="yes" />
+                android:layout_height="300dp">
+
+                <com.insta360.kmpsdk.demo.touchscene.TactileMapView
+                    android:id="@+id/tactile_map_view"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:contentDescription="@string/touchscene_map_content_description"
+                    android:focusable="true"
+                    android:importantForAccessibility="yes" />
+
+                <FrameLayout
+                    android:id="@+id/live_preview_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@android:color/black"
+                    android:importantForAccessibility="no"
+                    android:visibility="gone" />
+            </FrameLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -294,18 +270,6 @@
                     android:background="?attr/selectableItemBackground"
                     android:padding="8dp"
                     android:text="@string/mode_params_setting"
-                    android:textColor="@color/demo_accent"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:id="@+id/open_preview_params_sheet"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:background="?attr/selectableItemBackground"
-                    android:gravity="end"
-                    android:padding="8dp"
-                    android:text="@string/preview_params_setting"
                     android:textColor="@color/demo_accent"
                     android:textSize="14sp" />
             </LinearLayout>
