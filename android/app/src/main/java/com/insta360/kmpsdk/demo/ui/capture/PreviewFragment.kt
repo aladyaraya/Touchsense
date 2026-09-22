@@ -9,10 +9,16 @@ import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.WindowManager
+import android.content.res.ColorStateList
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.Gravity
+import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
@@ -98,6 +104,11 @@ class PreviewFragment : Fragment() {
     private var _binding: FragmentPreviewBinding? = null
     private val binding get() = _binding!!
 
+    companion object {
+        private const val LIVE_PREVIEW_FIRST_FRAME_TIMEOUT_MS = 3_000L
+        private const val MAX_LIVE_PREVIEW_RECOVERY_ATTEMPTS = 2
+    }
+
     private val connectionViewModel: ConnectionViewModel by activityViewModels {
         ConnectionViewModel.Factory(requireActivity().application)
     }
@@ -137,7 +148,13 @@ class PreviewFragment : Fragment() {
     private var touchDebugCountsMapVersion: Long? = null
     private var livePreviewView: InstaCapturePlayerView? = null
     private var latestCameraPosture: CameraPosture? = null
+    private val livePreviewFirstFrameRendered = AtomicBoolean(false)
+    private var livePreviewRecoveryAttempts = 0
+    private var livePreviewWatchdogGeneration = 0L
     private val localDemoMode: Boolean get() = arguments?.getBoolean("touchsceneLocalDemo") == true
+
+    private val previewLayoutChangeListener =
+        View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> applyLivePreviewAspect() }
 
     private data class TactileCellCounts(val background: Int, val subject: Int, val boundary: Int)
 
@@ -193,6 +210,13 @@ class PreviewFragment : Fragment() {
                 traceEvent("preview", "stream_opened")
 
                 val device = connectionViewModel.getCameraDevice() ?: return
+                // 请求一次关键帧，加速首帧出图、避免黑屏
+                runCatching { device.preview.requestStreamIframe() }
+                val currentPipeline = livePreviewView?.getPipeline()
+                if (currentPipeline != null) {
+                    runCatching { device.preview.setPipeline(currentPipeline) }
+                }
+
                 // 某些机型的参数回调晚于视频数据；先缓存预览默认参数。
                 // 用户冻结时才创建解码器并请求关键帧。
                 if (rawStreamWidth <= 0 || rawStreamHeight <= 0) {
@@ -214,6 +238,7 @@ class PreviewFragment : Fragment() {
                     }
                 }
                 prepareLivePreviewPlayer()
+                scheduleLivePreviewWatchdog()
                 _binding?.root?.post {
                     if (_binding == null) return@post
                     updateStreamToggleLabel()
@@ -262,6 +287,7 @@ class PreviewFragment : Fragment() {
                     if (paramsUpdate.previewWidth > 0 && paramsUpdate.previewHeight > 0 && paramsUpdate.previewFps > 0) {
                         view.setPreviewResolution(paramsUpdate.previewWidth, paramsUpdate.previewHeight)
                         view.setFps(paramsUpdate.previewFps)
+                        view.post { applyLivePreviewAspect() }
                     }
                     paramsUpdate.windowCropInfo?.let { crop ->
                         view.setWindowCropInfo(
@@ -336,10 +362,26 @@ class PreviewFragment : Fragment() {
         if (!localDemoMode) observeCameraDisconnectedNavigateToConnection(connectionViewModel)
         setupTouchScene()
 
-        binding.backLink.setOnClickListener { findNavController().popBackStack() }
-        binding.streamToggleBtn.setOnClickListener {
-            if (previewStarted) stopStreamByUser() else startStreamByUser()
+        // 自动开启视频流：无需用户手动点击开关
+        startPreviewIfNeeded()
+
+        // 底部操作区双按钮：触觉震动反馈与功能绑定
+        attachTactileHapticFeedback(binding.toggleDescribeLiveBtn) {
+            if (stillRequestInFlight) return@attachTactileHapticFeedback
+            val state = touchSceneCoordinator?.currentSessionState() ?: TactileSessionState.LIVE
+            if (state == TactileSessionState.LIVE) {
+                freezeCurrentFrame()
+            } else {
+                returnToLive()
+            }
         }
+
+        attachTactileHapticFeedback(binding.uploadImageBtn) {
+            val message = getString(R.string.touchscene_upload_image_hint)
+            speechOutput?.speak(message)
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+        }
+
         binding.openModeParamsSheet.setOnClickListener {
             CaptureParamsBottomSheetFragment.show(childFragmentManager)
         }
@@ -383,6 +425,9 @@ class PreviewFragment : Fragment() {
                                     device.sdStatus,
                                     device.sdRemaining,
                                 )
+                            if (!previewStarted) {
+                                startPreviewIfNeeded()
+                            }
                         }
                     }
             }
@@ -463,6 +508,9 @@ class PreviewFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         requireActivity().window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (!previewStarted) {
+            startPreviewIfNeeded()
+        }
     }
 
     override fun onPause() {
@@ -591,6 +639,11 @@ class PreviewFragment : Fragment() {
                 Timber.d("live preview onLoadingFinish: bind pipeline")
                 device.preview.setPipeline(pipeline)
                 runCatching { device.preview.requestStreamIframe() }
+                _binding?.root?.post {
+                    if (!isAdded || _binding == null) return@post
+                    applyLivePreviewAspect()
+                    updateLivePreviewVisibility()
+                }
             }
 
             override fun onFail(exception: InstaException) {
@@ -599,6 +652,12 @@ class PreviewFragment : Fragment() {
 
             override fun onFirstFrameRendered() {
                 Timber.d("live preview first frame rendered")
+                livePreviewFirstFrameRendered.set(true)
+                traceEvent("preview", "player_first_frame")
+                _binding?.root?.post {
+                    if (!isAdded || _binding == null) return@post
+                    updateLivePreviewVisibility()
+                }
             }
 
             override fun onReleaseCameraPipeline() {
@@ -612,29 +671,101 @@ class PreviewFragment : Fragment() {
         livePreviewView =
             InstaCapturePlayerView(requireContext()).also { view ->
                 view.setListener(livePreviewPlayerListener)
-                view.setLifecycle(lifecycle)
+                view.setLifecycle(viewLifecycleOwner.lifecycle)
                 view.setGestureEnabled(false)
                 binding.livePreviewContainer.addView(
                     view,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        Gravity.CENTER,
+                    ),
                 )
             }
+        binding.livePreviewContainer.addOnLayoutChangeListener(previewLayoutChangeListener)
+        applyLivePreviewAspect()
     }
 
-    /** 与 LiveStreamFragment 同一模式：onOpened 后重建渲染再 play，pipeline 在 onLoadingFinish 绑定。 */
+    private fun applyLivePreviewAspect() {
+        val playerView = livePreviewView ?: return
+        if (_binding == null) return
+        val containerWidth = binding.livePreviewContainer.width
+        val containerHeight = binding.livePreviewContainer.height
+        if (containerWidth <= 0 || containerHeight <= 0) return
+
+        val videoWidth = previewWidth.coerceAtLeast(1)
+        val videoHeight = previewHeight.coerceAtLeast(1)
+        val aspect = videoWidth.toFloat() / videoHeight.toFloat()
+
+        var targetWidth = containerWidth
+        var targetHeight = (targetWidth / aspect).toInt()
+        if (targetHeight > containerHeight) {
+            targetHeight = containerHeight
+            targetWidth = (targetHeight * aspect).toInt()
+        }
+        targetWidth = targetWidth.coerceAtLeast(1)
+        targetHeight = targetHeight.coerceAtLeast(1)
+
+        val lp = (playerView.layoutParams as? FrameLayout.LayoutParams)
+            ?: FrameLayout.LayoutParams(targetWidth, targetHeight, Gravity.CENTER)
+        if (lp.width != targetWidth || lp.height != targetHeight || lp.gravity != Gravity.CENTER) {
+            lp.width = targetWidth
+            lp.height = targetHeight
+            lp.gravity = Gravity.CENTER
+            playerView.layoutParams = lp
+        }
+    }
+
+    /**
+     * 与 LiveStreamFragment 同一模式：onOpened 后重建渲染再 play，pipeline 在 onLoadingFinish 绑定。
+     * Wi-Fi 刚连上时 SDK 相机模块可能尚未注册，prepare 抛 CameraNotConnectedException；
+     * 更糟的是此时已打开的 native 流会话会永久卡在 loading（onLoadingFinish 永不回调、
+     * pipeline 不绑定、解码帧全部丢弃），播放器层重试无效，只能整条流重启恢复，见 [scheduleLivePreviewWatchdog]。
+     */
     private fun prepareLivePreviewPlayer() {
-        initLivePreviewPlayer()
         val view = livePreviewView ?: return
         view.post {
-            if (!isAdded || _binding == null) return@post
+            if (!isAdded || _binding == null || !previewStarted) return@post
             val pv = livePreviewView ?: return@post
-            pv.destroyRender()
-            pv.prepare(PreviewParams())
-            pv.play()
-            latestCameraPosture?.let(::applyLivePreviewRotation)
-            updateLivePreviewVisibility()
+            livePreviewFirstFrameRendered.set(false)
+            runCatching {
+                pv.destroyRender()
+                pv.prepare(PreviewParams())
+                pv.play()
+                latestCameraPosture?.let(::applyLivePreviewRotation)
+                applyLivePreviewAspect()
+                updateLivePreviewVisibility()
+            }.onFailure {
+                Timber.w(it, "prepareLivePreviewPlayer failed")
+                traceEvent("preview", "player_prepare_failed", code = it.javaClass.simpleName)
+            }
         }
+    }
+
+    /**
+     * 首帧看门狗：开流后一段时间仍无首帧，说明流会话处于坏状态（相机模块未就绪时开流的竞态）。
+     * 自动执行与"切出再切回 App"等价的整条流重启，带上限避免死循环。
+     */
+    private fun scheduleLivePreviewWatchdog() {
+        val root = _binding?.root ?: return
+        val generation = ++livePreviewWatchdogGeneration
+        root.postDelayed({
+            if (!isAdded || _binding == null || !previewStarted) return@postDelayed
+            if (generation != livePreviewWatchdogGeneration) return@postDelayed
+            if (livePreviewFirstFrameRendered.get()) return@postDelayed
+            if (livePreviewRecoveryAttempts >= MAX_LIVE_PREVIEW_RECOVERY_ATTEMPTS) {
+                traceEvent("preview", "stream_recovery_exhausted")
+                return@postDelayed
+            }
+            livePreviewRecoveryAttempts++
+            traceEvent("preview", "stream_recovery_restart", code = livePreviewRecoveryAttempts.toString())
+            val device = connectionViewModel.getCameraDevice() ?: return@postDelayed
+            viewLifecycleOwner.lifecycleScope.launch {
+                if (!isAdded || _binding == null || !previewStarted) return@launch
+                if (livePreviewFirstFrameRendered.get()) return@launch
+                doRestartStream(device) { true }
+            }
+        }, LIVE_PREVIEW_FIRST_FRAME_TIMEOUT_MS)
     }
 
     /** “调试图层：原图”与实时预览合并：仅 LIVE 且当前图层为原图、流在播时显示 SDK 渲染画面。 */
@@ -645,6 +776,9 @@ class PreviewFragment : Fragment() {
                 touchSceneCoordinator?.currentSessionState() == TactileSessionState.LIVE &&
                 b.tactileMapView.debugMode == TactileDebugMode.ORIGINAL
         b.livePreviewContainer.isVisible = showLive
+        if (showLive) {
+            applyLivePreviewAspect()
+        }
     }
 
     private fun releaseLivePreviewPlayer() {
@@ -684,17 +818,43 @@ class PreviewFragment : Fragment() {
         binding.mapMoveDownBtn.setOnClickListener { binding.tactileMapView.moveAccessibilityCursor(0, 1) }
         binding.mapMoveLeftBtn.setOnClickListener { binding.tactileMapView.moveAccessibilityCursor(-1, 0) }
         binding.mapMoveRightBtn.setOnClickListener { binding.tactileMapView.moveAccessibilityCursor(1, 0) }
-        binding.debugLayerBtn.setOnClickListener {
-            val label = when (binding.tactileMapView.cycleDebugMode()) {
-                TactileDebugMode.ORIGINAL -> R.string.touchscene_debug_original
-                TactileDebugMode.GRAYSCALE -> R.string.touchscene_debug_grayscale
-                TactileDebugMode.BINARY -> R.string.touchscene_debug_binary
-                TactileDebugMode.EDGE -> R.string.touchscene_debug_edge
-                TactileDebugMode.PHOTO_BINARY -> R.string.touchscene_debug_photo_binary
-                TactileDebugMode.TOUCH_MAP -> R.string.touchscene_debug_touch_map
-            }
-            binding.debugLayerBtn.setText(label)
+        // 双击图层循环切换：原图 -> Canny图层 -> 二值图层 -> 原图
+        // 由于循环顺序固定，目标图层唯一决定本次切换，语音直接按目标播报
+        binding.tactileMapView.onDebugModeChanged = { mode ->
             updateLivePreviewVisibility()
+            val promptRes = when (mode) {
+                TactileDebugMode.ORIGINAL -> R.string.touchscene_layer_to_original
+                TactileDebugMode.EDGE -> R.string.touchscene_layer_to_edge
+                TactileDebugMode.BINARY -> R.string.touchscene_layer_to_binary
+                else -> 0
+            }
+            if (promptRes != 0) {
+                speechOutput?.speak(getString(promptRes))
+                haptics.playSuccess()
+            }
+        }
+
+        val livePreviewDoubleTapDetector =
+            GestureDetector(
+                requireContext(),
+                object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onDoubleTap(e: MotionEvent): Boolean {
+                        if (touchSceneCoordinator?.activeMapVersion() == null) {
+                            speechOutput?.speak("请先点击描述当前画面生成触觉图层")
+                            return true
+                        }
+                        binding.tactileMapView.cycleDebugMode()
+                        return true
+                    }
+                },
+            )
+        binding.livePreviewContainer.setOnTouchListener { _, event ->
+            livePreviewDoubleTapDetector.onTouchEvent(event)
+            true
+        }
+        initLivePreviewPlayer()
+        if (connectionViewModel.getCameraDevice() == null) {
+            binding.touchsceneStatus.text = "正在连接相机…"
         }
         touchSceneCoordinator =
             TouchSceneCoordinator(
@@ -732,18 +892,7 @@ class PreviewFragment : Fragment() {
             }
             requestStillFrame(refresh = true)
         }
-        binding.returnLiveBtn.setOnClickListener {
-            if (binding.tactileMapView.isFingerExploring) {
-                speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
-                return@setOnClickListener
-            }
-            cancelStillRequest()
-            hapticRenderer?.cancel()
-            val map = touchSceneCoordinator?.leaveExploration()
-            traceEvent("map", "returned_live", mapVersion = map?.version)
-            binding.tactileMapView.explorationEnabled = false
-            speechOutput?.speak(getString(R.string.touchscene_returned_live))
-        }
+        binding.returnLiveBtn.setOnClickListener { returnToLive() }
         binding.describeSceneBtn.setOnClickListener { describeLatestScene() }
         binding.hapticEnabled.setOnCheckedChangeListener { _, enabled ->
             haptics.setEnabled(enabled)
@@ -756,6 +905,86 @@ class PreviewFragment : Fragment() {
             binding.rawFrameStatus.setText(R.string.touchscene_local_demo_active)
             binding.captureBtn.isEnabled = false
             binding.streamToggleBtn.isEnabled = false
+        }
+    }
+
+    private fun returnToLive() {
+        if (binding.tactileMapView.isFingerExploring) {
+            speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
+            return
+        }
+        cancelStillRequest()
+        hapticRenderer?.cancel()
+        val map = touchSceneCoordinator?.leaveExploration()
+        traceEvent("map", "returned_live", mapVersion = map?.version)
+        binding.tactileMapView.explorationEnabled = false
+        speechOutput?.speak(getString(R.string.touchscene_returned_live))
+    }
+
+    /**
+     * 为触觉摄影界面的底部按钮添加完整的触感震动反馈与无障碍支持。
+     * 手指按下即震动，移出停止，松开触发点击；同时支持无障碍 TalkBack 滑入震动。
+     */
+    private fun attachTactileHapticFeedback(button: View, onClick: () -> Unit) {
+        var isFingerOnButton = false
+        button.setOnTouchListener { v, event ->
+            if (!v.isEnabled) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    isFingerOnButton = true
+                    v.isPressed = true
+                    hapticRenderer?.render(1)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val isInside = event.x in 0f..v.width.toFloat() && event.y in 0f..v.height.toFloat()
+                    v.isPressed = isInside
+                    if (isInside) {
+                        if (!isFingerOnButton) {
+                            isFingerOnButton = true
+                            hapticRenderer?.render(1)
+                        }
+                    } else {
+                        if (isFingerOnButton) {
+                            isFingerOnButton = false
+                            hapticRenderer?.cancel()
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    v.isPressed = false
+                    hapticRenderer?.cancel()
+                    val isInside = event.x in 0f..v.width.toFloat() && event.y in 0f..v.height.toFloat()
+                    if (isInside && isFingerOnButton) {
+                        v.performClick()
+                    }
+                    isFingerOnButton = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    v.isPressed = false
+                    hapticRenderer?.cancel()
+                    isFingerOnButton = false
+                    true
+                }
+                else -> false
+            }
+        }
+        button.setOnLongClickListener { true }
+        button.setOnHoverListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_HOVER_ENTER -> hapticRenderer?.render(1)
+                MotionEvent.ACTION_HOVER_EXIT -> hapticRenderer?.cancel()
+            }
+            false
+        }
+        button.setOnClickListener {
+            hapticRenderer?.playSuccess()
+            onClick()
         }
     }
 
@@ -783,6 +1012,19 @@ class PreviewFragment : Fragment() {
         binding.mapMoveLeftBtn.isEnabled = canExplore
         binding.mapMoveRightBtn.isEnabled = canExplore
         binding.refreshMapBtn.isEnabled = update.sessionState != TactileSessionState.LIVE && !stillRequestInFlight
+
+        val isLive = update.sessionState == TactileSessionState.LIVE
+        binding.toggleDescribeLiveBtn.text = getString(
+            if (isLive) R.string.touchscene_btn_describe_current else R.string.touchscene_btn_resume_video,
+        )
+        binding.toggleDescribeLiveBtn.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(
+                requireContext(),
+                if (isLive) R.color.touchscene_primary else R.color.touchscene_success,
+            ),
+        )
+        binding.toggleDescribeLiveBtn.isEnabled = !stillRequestInFlight
+
         binding.touchsceneStatus.text =
             when (update.sessionState) {
                 TactileSessionState.LIVE -> getString(R.string.touchscene_live_map)
@@ -819,6 +1061,8 @@ class PreviewFragment : Fragment() {
         traceEvent("map", if (refresh) "refresh_requested" else "freeze_requested")
         binding.freezeMapBtn.isEnabled = false
         binding.refreshMapBtn.isEnabled = false
+        binding.toggleDescribeLiveBtn.isEnabled = false
+        binding.toggleDescribeLiveBtn.text = "正在识别画面…"
         binding.touchsceneStatus.setText(R.string.touchscene_freezing_frame)
         if (localDemoMode) {
             touchSceneCoordinator?.analyzeAndFreeze(
@@ -837,8 +1081,19 @@ class PreviewFragment : Fragment() {
     private fun failStillRequest(generation: Long, code: String) {
         if (!stillRequestInFlight || generation != stillRequestGeneration) return
         cancelStillRequest()
-        binding.freezeMapBtn.isEnabled = touchSceneCoordinator?.currentSessionState() == TactileSessionState.LIVE
-        binding.refreshMapBtn.isEnabled = touchSceneCoordinator?.currentSessionState() != TactileSessionState.LIVE
+        val isLive = touchSceneCoordinator?.currentSessionState() == TactileSessionState.LIVE
+        binding.freezeMapBtn.isEnabled = isLive
+        binding.refreshMapBtn.isEnabled = !isLive
+        binding.toggleDescribeLiveBtn.isEnabled = true
+        binding.toggleDescribeLiveBtn.text = getString(
+            if (isLive) R.string.touchscene_btn_describe_current else R.string.touchscene_btn_resume_video,
+        )
+        binding.toggleDescribeLiveBtn.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(
+                requireContext(),
+                if (isLive) R.color.touchscene_primary else R.color.touchscene_success,
+            ),
+        )
         binding.touchsceneStatus.setText(R.string.touchscene_no_frame)
         traceEvent("map", "freeze_failed", code = code)
         speechOutput?.speak(getString(R.string.touchscene_no_frame))
@@ -852,6 +1107,7 @@ class PreviewFragment : Fragment() {
         traceEvent("map", if (refreshed) "refreshed" else "frozen", mapVersion = map.version)
         binding.refreshMapBtn.isEnabled = true
         binding.returnLiveBtn.isEnabled = true
+        binding.toggleDescribeLiveBtn.isEnabled = true
         binding.tactileMapView.explorationEnabled = true
         binding.scrollView.gestureInterceptTarget = binding.tactileMapView
         binding.tactileMapView.requestFocus()
@@ -1058,6 +1314,7 @@ class PreviewFragment : Fragment() {
             device.preview.registerCameraStreamListener(streamListener)
             device.preview.registerPostureListener(touchScenePostureListener)
             previewStarted = true
+            livePreviewRecoveryAttempts = 0
             device.preview.startStream()
         }.onFailure {
             traceEvent("preview", "start_failed", code = (it as? NativeException)?.nativeErrorCode?.toString() ?: it.javaClass.simpleName)
@@ -1255,7 +1512,6 @@ class PreviewFragment : Fragment() {
     private fun applySecondaryInteractionLock(locked: Boolean) {
         val alpha = if (locked) 0.45f else 1f
         listOf(
-            binding.backLink,
             binding.openModeParamsSheet,
         ).forEach {
             it.isEnabled = !locked
@@ -1291,6 +1547,7 @@ class PreviewFragment : Fragment() {
         Timber.d("onDestroyView")
         voiceTurnGate.reset()
         stopPreview()
+        _binding?.livePreviewContainer?.removeOnLayoutChangeListener(previewLayoutChangeListener)
         releaseLivePreviewPlayer()
         speechRecognizer?.destroy()
         speechRecognizer = null

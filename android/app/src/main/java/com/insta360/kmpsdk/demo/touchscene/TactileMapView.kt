@@ -7,14 +7,27 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import com.insta360.kmpsdk.demo.R
 import kotlin.math.ceil
 import kotlin.math.floor
 
-enum class TactileDebugMode { ORIGINAL, GRAYSCALE, BINARY, EDGE, PHOTO_BINARY, TOUCH_MAP;
-    fun next(): TactileDebugMode = entries[(ordinal + 1) % entries.size]
+enum class TactileDebugMode {
+    ORIGINAL,
+    EDGE,
+    BINARY,
+    GRAYSCALE,
+    PHOTO_BINARY,
+    TOUCH_MAP;
+
+    fun next(): TactileDebugMode = when (this) {
+        ORIGINAL -> EDGE
+        EDGE -> BINARY
+        BINARY -> ORIGINAL
+        else -> ORIGINAL
+    }
 }
 
 class TactileMapView @JvmOverloads constructor(
@@ -35,8 +48,9 @@ class TactileMapView @JvmOverloads constructor(
         private set
     val displayedMapVersion: Long?
         get() = tactileMap?.version
-    var debugMode: TactileDebugMode = TactileDebugMode.TOUCH_MAP
+    var debugMode: TactileDebugMode = TactileDebugMode.ORIGINAL
         private set
+    var onDebugModeChanged: ((TactileDebugMode) -> Unit)? = null
     var hapticRenderer: AndroidHapticRenderer? = null
     var onExplorationStarted: ((Long) -> Unit)? = null
     var onTouchDebug: ((pixelX: Float, pixelY: Float, grid: GridPoint?, cell: TactileCell, layerValue: Int) -> Unit)? = null
@@ -122,9 +136,23 @@ class TactileMapView @JvmOverloads constructor(
         }
     }
 
+    private val doubleTapDetector =
+        GestureDetector(
+            context,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    hapticRenderer?.cancel()
+                    finishFingerExploration()
+                    cycleDebugMode()
+                    return true
+                }
+            },
+        )
+
     fun cycleDebugMode(): TactileDebugMode {
         debugMode = debugMode.next()
         rebuildDebugBitmap()
+        onDebugModeChanged?.invoke(debugMode)
         return debugMode
     }
 
@@ -231,8 +259,9 @@ class TactileMapView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        doubleTapDetector.onTouchEvent(event)
         if (!explorationEnabled) return super.onTouchEvent(event)
-        val map = tactileMap ?: return false
+        val map = tactileMap ?: return true
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {

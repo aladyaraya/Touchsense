@@ -529,6 +529,17 @@
     <string name="touchscene_debug_edge">Debug layer: Canny edges</string>
     <string name="touchscene_debug_photo_binary">Debug layer: minimal binary</string>
     <string name="touchscene_debug_touch_map">Debug layer: final tactile map</string>
+    <string name="touchscene_layer_original">Original</string>
+    <string name="touchscene_layer_canny">Canny layer</string>
+    <string name="touchscene_layer_binary">Binary layer</string>
+    <string name="touchscene_layer_switched">Switched to: %s</string>
+    <string name="touchscene_layer_to_edge">You can now touch and feel the objects themselves</string>
+    <string name="touchscene_layer_to_binary">You can now touch and feel the object outlines</string>
+    <string name="touchscene_layer_to_original">Switched back to the original image</string>
+    <string name="touchscene_btn_describe_current">Describe Scene</string>
+    <string name="touchscene_btn_resume_video">Resume Video</string>
+    <string name="touchscene_btn_upload_image">Upload Image</string>
+    <string name="touchscene_upload_image_hint">Upload image coming soon</string>
     <string name="touchscene_live_map">Waiting to freeze a frame. Say "freeze current frame".</string>
     <string name="touchscene_freezing_frame">Capturing and analyzing the current frame…</string>
     <string name="touchscene_exploring_map">Frozen map v%1$d, scan with one finger</string>
@@ -574,4 +585,18 @@
     <string name="touchscene_local_demo">TouchScene local demo without a camera</string>
     <string name="touchscene_local_demo_description">Use a built-in high-contrast frame to test the tactile and speech pipeline without an Insta360 camera</string>
     <string name="touchscene_local_demo_active">Local demo frame loaded. Freeze, explore, or describe it.</string>
+
+    <!-- Home page tech redesign strings -->
+    <string name="touchscene_home_title">TouchScene</string>
+    <string name="touchscene_home_subtitle">Tactile Multimodal Vision System · Accessibility</string>
+    <string name="touchscene_home_device_tag">Targeted for Insta360 Ace Pro 2</string>
+    <string name="touchscene_wifi_hero_title">Wi‑Fi One-Tap Connect</string>
+    <string name="touchscene_wifi_hero_desc">Tap to link Ace Pro 2 high-speed stream</string>
+    <string name="touchscene_wifi_hero_connecting">Establishing camera stream link…</string>
+    <string name="touchscene_wifi_hero_connected">Connected to Camera · Tap to Reconnect</string>
+    <string name="touchscene_wifi_hero_accessibility">Wi-Fi one-tap connect to camera. Double tap to start connection.</string>
+    <string name="touchscene_camera_hud_title">Camera Telemetry HUD</string>
+    <string name="touchscene_enter_preview_hero">Enter Tactile Exploration</string>
+    <string name="touchscene_enter_preview_sub">Launch accessible live video stream &amp; tactile canvas</string>
+    <string name="touchscene_status_ready">System ready, awaiting connection</string>
 </resources>

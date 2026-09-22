@@ -529,6 +529,17 @@
     <string name="touchscene_debug_edge">调试图层：Canny 边缘</string>
     <string name="touchscene_debug_photo_binary">调试图层：极简二值</string>
     <string name="touchscene_debug_touch_map">调试图层：最终触觉图</string>
+    <string name="touchscene_layer_original">原图</string>
+    <string name="touchscene_layer_canny">Canny图层</string>
+    <string name="touchscene_layer_binary">二值图层</string>
+    <string name="touchscene_layer_switched">已切换为：%s</string>
+    <string name="touchscene_layer_to_edge">现在您可以触摸感知物体本身</string>
+    <string name="touchscene_layer_to_binary">现在您可以触摸感知物体轮廓</string>
+    <string name="touchscene_layer_to_original">现在切换到原图了</string>
+    <string name="touchscene_btn_describe_current">描述当前画面</string>
+    <string name="touchscene_btn_resume_video">恢复视频</string>
+    <string name="touchscene_btn_upload_image">上传图片</string>
+    <string name="touchscene_upload_image_hint">上传图片功能即将推出</string>
     <string name="touchscene_live_map">等待冻结画面，可以说“冻结当前画面”</string>
     <string name="touchscene_freezing_frame">正在获取并分析当前画面…</string>
     <string name="touchscene_exploring_map">已冻结地图 v%1$d，可用手指扫描</string>
@@ -574,4 +585,18 @@
     <string name="touchscene_local_demo">TouchScene 无相机本地演示</string>
     <string name="touchscene_local_demo_description">不连接影石相机，使用内置高对比图验证触觉和语音链路</string>
     <string name="touchscene_local_demo_active">本地演示帧已加载，可冻结、探索和描述</string>
+
+    <!-- 首页高科技感与无障碍重构文案 -->
+    <string name="touchscene_home_title">TouchScene</string>
+    <string name="touchscene_home_subtitle">触觉多模态视觉感知系统 · 视障无障碍辅助</string>
+    <string name="touchscene_home_device_tag">适配影石 Insta360 Ace Pro 2</string>
+    <string name="touchscene_wifi_hero_title">Wi‑Fi 一键连接相机</string>
+    <string name="touchscene_wifi_hero_desc">点击自动握手 Ace Pro 2 高速图传通道</string>
+    <string name="touchscene_wifi_hero_connecting">正在建立相机高速通道…</string>
+    <string name="touchscene_wifi_hero_connected">已连接相机 · 点击可重新连接</string>
+    <string name="touchscene_wifi_hero_accessibility">Wi-Fi 一键连接相机，双击开始连接影石相机</string>
+    <string name="touchscene_camera_hud_title">相机控制台 · 遥测状态</string>
+    <string name="touchscene_enter_preview_hero">进入触觉感知探索</string>
+    <string name="touchscene_enter_preview_sub">开启实时无障碍视频流与触觉画布</string>
+    <string name="touchscene_status_ready">系统准备就绪，等待连接</string>
 </resources>

@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
         navController.addOnDestinationChangedListener { _, destination, _ ->
             val hideBottom =
                 when (destination.id) {
+                    R.id.connectionFragment,
                     R.id.previewFragment, R.id.captureFragment, R.id.liveStreamFragment, R.id.videoPlayerFragment, R.id.imagePlayerFragment, R.id.stitchFragment -> true
                     else -> false
                 }
