@@ -1,0 +1,23 @@
+.DS_Store
+**/.DS_Store
+
+# Local Android configuration and build output
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+*.iml
+.idea/
+
+# Local dependencies, reports, and credentials
+node_modules/
+coverage/
+*.log
+touchpuck-*-qa.png
+.env
+.env.*
+*.jks
+*.keystore
+*.pem
+*.key

@@ -1,0 +1,10 @@
+{
+  "name": "TouchScene 触觉闭环实验台",
+  "short_name": "TouchScene",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#eef3f6",
+  "theme_color": "#0d1820",
+  "description": "视觉转触觉闭环验证：安卓振动与 ESP32 BLE。",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
