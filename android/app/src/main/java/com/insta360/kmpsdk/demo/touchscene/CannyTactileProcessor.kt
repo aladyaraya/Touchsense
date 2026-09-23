@@ -390,21 +390,7 @@ class CannyTactileProcessor(private val config: CannyConfig = CannyConfig()) {
         val thickBoundary = dilate(reducedBoundary, TactileMap.WIDTH, TactileMap.HEIGHT, config.tactileBoundaryRadius)
         thickBoundary.forEachIndexed { index, value -> if (value && eligible[index]) cells[index] = TactileCell.BOUNDARY.code }
 
-        selectSubjectKeyPoint(cells)?.let { cells[it] = TactileCell.KEY_POINT.code }
         return TactileMap(versions.incrementAndGet(), timestampMs, cells = cells)
-    }
-
-    /** A concave subject's centroid can be empty space, so snap to a real fill cell. */
-    internal fun selectSubjectKeyPoint(cells: ByteArray): Int? {
-        val subjectIndices = cells.indices.filter { cells[it] == TactileCell.SUBJECT.code }
-        if (subjectIndices.isEmpty()) return null
-        val centerX = subjectIndices.sumOf { it % TactileMap.WIDTH }.toDouble() / subjectIndices.size
-        val centerY = subjectIndices.sumOf { it / TactileMap.WIDTH }.toDouble() / subjectIndices.size
-        return subjectIndices.minBy { index ->
-            val dx = index % TactileMap.WIDTH - centerX
-            val dy = index / TactileMap.WIDTH - centerY
-            dx * dx + dy * dy
-        }
     }
 
     private fun resize(src: ByteArray, srcWidth: Int, srcHeight: Int, dstWidth: Int, dstHeight: Int): IntArray {

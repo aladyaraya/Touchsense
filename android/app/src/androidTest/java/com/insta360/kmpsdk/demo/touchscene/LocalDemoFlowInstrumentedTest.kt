@@ -60,9 +60,6 @@ class LocalDemoFlowInstrumentedTest {
             onMain {
                 assertTrue(activity.findViewById<Button>(R.id.entry_touchscene_local_demo).performClick())
             }
-            waitFor(15_000) {
-                onMain { activity.findViewById<TactileMapView>(R.id.tactile_map_view)?.displayedMapVersion != null }
-            }
             onMain {
                 assertTrue(
                     activity.findViewById<TextView>(R.id.raw_frame_status).text.toString() ==
@@ -72,6 +69,9 @@ class LocalDemoFlowInstrumentedTest {
             }
             onMain {
                 assertTrue(activity.findViewById<Button>(R.id.freeze_map_btn).performClick())
+            }
+            waitFor(15_000) {
+                onMain { activity.findViewById<TactileMapView>(R.id.tactile_map_view)?.displayedMapVersion != null }
             }
             waitFor(5_000) {
                 onMain {
@@ -103,7 +103,7 @@ class LocalDemoFlowInstrumentedTest {
             assertNotNull(description)
             assertTrue(description!!.isNotBlank())
 
-            // Voice capture must obey the same no-camera boundary as the disabled button.
+            // Voice capture/stream must obey the same no-camera boundary as the disabled button.
             onMain {
                 val navHost = activity.supportFragmentManager
                     .findFragmentById(R.id.nav_host_fragment) as NavHostFragment
@@ -111,18 +111,17 @@ class LocalDemoFlowInstrumentedTest {
                 val dispatch = PreviewFragment::class.java.getDeclaredMethod(
                     "dispatchVoiceCommand", VoiceCommand::class.java,
                 ).apply { isAccessible = true }
-                listOf(
-                    VoiceCommand.TakePhoto,
-                    VoiceCommand.StartRecording,
-                    VoiceCommand.StopRecording,
-                ).forEach { command ->
-                    dispatch.invoke(preview, command)
-                    assertTrue(
-                        activity.findViewById<TextView>(R.id.touchscene_status).text.toString() ==
-                            context.getString(R.string.touchscene_capture_requires_camera),
-                    )
-                    assertTrue(!activity.findViewById<Button>(R.id.capture_btn).isEnabled)
-                }
+                dispatch.invoke(preview, VoiceCommand.TakePhoto)
+                assertTrue(
+                    activity.findViewById<TextView>(R.id.touchscene_status).text.toString() ==
+                        context.getString(R.string.touchscene_capture_requires_camera),
+                )
+                assertTrue(!activity.findViewById<Button>(R.id.capture_btn).isEnabled)
+                dispatch.invoke(preview, VoiceCommand.StartStream)
+                assertTrue(
+                    activity.findViewById<TextView>(R.id.touchscene_status).text.toString() ==
+                        context.getString(R.string.touchscene_stream_requires_camera),
+                )
             }
             onMain {
                 assertTrue(!activity.findViewById<Button>(R.id.freeze_map_btn).isEnabled)

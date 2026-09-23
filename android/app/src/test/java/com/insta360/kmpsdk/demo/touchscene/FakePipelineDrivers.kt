@@ -2,21 +2,6 @@ package com.insta360.kmpsdk.demo.touchscene
 
 import com.insta360.kmpsdk.demo.raw.Yuv420Frame
 
-/** Controlled pixel translation for video-difference stability tests, not SDK posture data. */
-class FakeCameraMotionProvider {
-    fun shifted(frame: Yuv420Frame, dx: Int, dy: Int, timestampMs: Long): Yuv420Frame {
-        val shifted = ByteArray(frame.y.size) { 226.toByte() }
-        for (row in 0 until frame.height) for (x in 0 until frame.width) {
-            val sourceX = x - dx
-            val sourceY = row - dy
-            if (sourceX in 0 until frame.width && sourceY in 0 until frame.height) {
-                shifted[row * frame.width + x] = frame.y[sourceY * frame.width + sourceX]
-            }
-        }
-        return frame.copy(sourceTimestampMs = timestampMs, receivedAtElapsedRealtimeMs = timestampMs, y = shifted)
-    }
-}
-
 enum class FakeVisionScene { PERSON, TREE_AND_CAR, EMPTY }
 
 /** Fixed Chinese speech fixtures, excluded from the application APK. */

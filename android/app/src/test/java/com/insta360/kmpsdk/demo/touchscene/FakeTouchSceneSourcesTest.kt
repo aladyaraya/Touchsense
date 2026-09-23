@@ -46,18 +46,4 @@ class FakeTouchSceneSourcesTest {
         }
     }
 
-    @Test
-    fun `fake motion moves pixels and breaks READY stability`() {
-        val source = camera.frame(FakeContourScene.RECTANGLE, 0)
-        val motion = FakeCameraMotionProvider()
-        val stable = VideoStabilityEngine(StabilityConfig(stableDurationMs = 600))
-        fun update(frame: com.insta360.kmpsdk.demo.raw.Yuv420Frame, at: Long): StabilityUpdate =
-            stable.update(GrayFrame(frame.width, frame.height, at, frame.y), at)
-        assertFalse(update(source, 0).becameReady)
-        assertFalse(update(motion.shifted(source, 0, 0, 100), 100).becameReady)
-        assertTrue(update(motion.shifted(source, 0, 0, 700), 700).becameReady)
-        val moved = motion.shifted(source, 50, 0, 800)
-        assertFalse(moved.y.contentEquals(source.y))
-        assertEquals(StabilityState.MOVING, update(moved, 800).state)
-    }
 }

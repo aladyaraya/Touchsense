@@ -158,6 +158,7 @@ class AndroidSpeechOutput(
 ) : TextToSpeech.OnInitListener, AutoCloseable {
     private val lastText = AtomicReference<String?>(null)
     private val activeUtteranceId = AtomicReference<String?>(null)
+    private val pendingText = AtomicReference<String?>(null)
     private val tts = TextToSpeech(context.applicationContext, this)
     @Volatile private var ready = false
 
@@ -175,15 +176,22 @@ class AndroidSpeechOutput(
 
     override fun onInit(status: Int) {
         ready = status == TextToSpeech.SUCCESS && tts.setLanguage(Locale.SIMPLIFIED_CHINESE) >= TextToSpeech.LANG_AVAILABLE
+        if (ready) pendingText.getAndSet(null)?.let(::speak)
     }
 
     fun canSpeak(): Boolean = ready
 
     fun isSpeaking(): Boolean = activeUtteranceId.get() != null
 
+    /** Actual engine playback state, used when an OEM TTS omits the utterance onDone callback. */
+    fun isEngineSpeaking(): Boolean = ready && tts.isSpeaking
+
     fun speak(text: String) {
         lastText.set(text)
-        if (!ready) return
+        if (!ready) {
+            pendingText.set(text)
+            return
+        }
         val utteranceId = UUID.randomUUID().toString()
         activeUtteranceId.set(utteranceId)
         onSpeakingChanged(true)
@@ -211,6 +219,7 @@ class AndroidSpeechOutput(
     }
 
     override fun close() {
+        pendingText.set(null)
         activeUtteranceId.set(null)
         tts.stop()
         tts.shutdown()

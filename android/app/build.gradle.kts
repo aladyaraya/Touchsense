@@ -1,11 +1,24 @@
 import org.gradle.kotlin.dsl.implementation
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     kotlin("kapt")
 }
+
+// Gradle 只自动加载 gradle.properties；local.properties 需手动读，
+// 否则凭据静默为空、远程 AI 永远走本地兜底
+val touchSceneLocalProps =
+    Properties().apply {
+        val f = rootProject.file("local.properties")
+        if (f.isFile) f.inputStream().use(::load)
+    }
+
+fun touchSceneProperty(name: String): String? =
+    (project.findProperty(name) as? String)?.takeIf { it.isNotBlank() }
+        ?: touchSceneLocalProps.getProperty(name)?.takeIf { it.isNotBlank() }
 
 android {
     namespace = "com.insta360.kmpsdk.demo"
@@ -19,6 +32,29 @@ android {
         versionName = libs.versions.inskmpVersion.get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 远程 AI 接口与 key：在 local.properties 或 gradle 命令行配置
+        // touchscene.ai.endpoint / touchscene.ai.key，凭据不进版本库
+        buildConfigField(
+            "String",
+            "TOUCHSCENE_AI_ENDPOINT",
+            "\"${touchSceneProperty("touchscene.ai.endpoint") ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "TOUCHSCENE_AI_KEY",
+            "\"${touchSceneProperty("touchscene.ai.key") ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "TOUCHSCENE_AI_MODEL",
+            "\"${touchSceneProperty("touchscene.ai.model") ?: "qwen3-vl-flash"}\"",
+        )
+        buildConfigField(
+            "String",
+            "TOUCHSCENE_AI_ASR_MODEL",
+            "\"${touchSceneProperty("touchscene.ai.asrModel") ?: "qwen3-asr-flash"}\"",
+        )
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -45,6 +81,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
     // lint 与当前 Kotlin UAST 工具链偶发不兼容导致 NonNullableMutableLiveDataDetector 崩溃，禁用该检测器以恢复 lintDebug
     lint {
@@ -69,6 +106,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.mlkit.image.labeling)
     testImplementation(libs.junit)
+    // 让 JVM 单元测试能运行 android 同款 org.json 解析逻辑
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
@@ -80,4 +119,7 @@ dependencies {
 
     implementation(libs.inskmp.camera)
     implementation(libs.inskmp.media)
+
+    // OpenCV：边缘(自适应阈值+轮廓)与轮廓(GrabCut)算法所需
+    implementation(project(":opencv-sdk"))
 }

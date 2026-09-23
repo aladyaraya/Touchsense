@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@color/touchscene_primary"
+        android:pathData="M12,4C7.31,4 3.07,5.9 0,8.98L12,21L24,8.98C20.93,5.9 16.69,4 12,4ZM12,6.18C15.98,6.18 19.6,7.74 22.3,10.27L12,20.61L1.7,10.27C4.4,7.74 8.02,6.18 12,6.18ZM12,9C8.82,9 5.92,10.2 3.73,12.24L12,20.53L20.27,12.24C18.08,10.2 15.18,9 12,9ZM12,11.23C14.33,11.23 16.47,12.09 18.15,13.52L12,19.69L5.85,13.52C7.53,12.09 9.67,11.23 12,11.23Z" />
+</vector>

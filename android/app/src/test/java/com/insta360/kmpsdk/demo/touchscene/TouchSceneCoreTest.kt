@@ -1,7 +1,8 @@
 package com.insta360.kmpsdk.demo.touchscene
 
-import org.junit.Assert.assertEquals
+import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -12,7 +13,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import com.insta360.kmpsdk.demo.raw.Yuv420Frame
 
 class TouchSceneCoreTest {
@@ -105,23 +105,6 @@ class TouchSceneCoreTest {
         assertTrue(values.contains(TactileCell.BACKGROUND.code))
         assertTrue(values.contains(TactileCell.SUBJECT.code))
         assertTrue(values.contains(TactileCell.BOUNDARY.code))
-        assertTrue(values.contains(TactileCell.KEY_POINT.code))
-    }
-
-    @Test
-    fun `key point for concave subject stays on the subject`() {
-        val cells = ByteArray(TactileMap.WIDTH * TactileMap.HEIGHT)
-        for (y in 10..35) for (x in 12..48) {
-            if (x <= 18 || x >= 42 || y >= 31) {
-                cells[y * TactileMap.WIDTH + x] = TactileCell.SUBJECT.code
-            }
-        }
-        val processor = CannyTactileProcessor()
-        val keyPoint = processor.selectSubjectKeyPoint(cells)
-        assertNotNull(keyPoint)
-        assertEquals(TactileCell.SUBJECT.code, cells[keyPoint!!])
-        assertEquals(TactileCell.BACKGROUND.code, cells[24 * TactileMap.WIDTH + 30])
-        assertNull(processor.selectSubjectKeyPoint(ByteArray(cells.size)))
     }
 
     @Test
@@ -271,7 +254,7 @@ class TouchSceneCoreTest {
             assertEquals(frozen?.version, update.map?.version)
             assertEquals(frozen?.version, update.debugSnapshot?.version)
             assertEquals(1L, update.debugSnapshot?.source?.sourceTimestampMs)
-            assertEquals(TactileSessionState.STALE, update.sessionState)
+            assertEquals(TactileSessionState.EXPLORING, update.sessionState)
             coordinator.describeLatest { description ->
                 descriptionText.set(description?.text)
                 described.countDown()
@@ -298,177 +281,7 @@ class TouchSceneCoreTest {
     }
 
     @Test
-    fun `automatic announcement requires meaningful change and five second cooldown`() {
-        val policy = AutomaticSceneAnnouncementPolicy()
-        val empty = SceneDescription("暂时没有可用的画面描述", 0, "fallback")
-        val person = SceneDescription("中央有人", 0, "test", subject = "人", position = "中部")
-        val left = person.copy(text = "左侧有人", position = "偏左")
-        assertFalse(policy.shouldAnnounce(empty, 0))
-        assertTrue(policy.shouldAnnounce(person, 100))
-        assertFalse(policy.shouldAnnounce(person.copy(timestampMs = 200), 6_000))
-        assertFalse(policy.shouldAnnounce(left, 5_099))
-        assertTrue(policy.shouldAnnounce(left, 5_100))
-        policy.markAnnounced(person, 6_000)
-        assertFalse(policy.shouldAnnounce(person, 12_000))
-        policy.reset()
-        assertTrue(policy.shouldAnnounce(person, 12_001))
-    }
-
-    @Test
-    fun `automatic vision analysis is periodic and independent of edge updates`() {
-        val announcements = CountDownLatch(2)
-        val firstAnnouncement = CountDownLatch(1)
-        val firstEdge = CountDownLatch(1)
-        val secondEdge = CountDownLatch(1)
-        val thirdEdge = CountDownLatch(1)
-        val calls = AtomicInteger()
-        val describer = object : SceneDescriber {
-            override fun describe(frame: Yuv420Frame, map: TactileMap?): SceneDescription {
-                calls.incrementAndGet()
-                return SceneDescription("frame-${frame.sourceTimestampMs}", frame.sourceTimestampMs, "test")
-            }
-        }
-        TouchSceneCoordinator(
-            describer = describer,
-            onAutomaticDescription = { firstAnnouncement.countDown(); announcements.countDown() },
-        ) { update ->
-            when (update.debugSnapshot?.source?.sourceTimestampMs) {
-                0L -> firstEdge.countDown()
-                1_000L -> secondEdge.countDown()
-                5_000L -> thirdEdge.countDown()
-            }
-        }.use { coordinator ->
-            coordinator.offer(testYuvFrame(0, 30))
-            assertTrue(firstEdge.await(3, TimeUnit.SECONDS))
-            assertTrue(firstAnnouncement.await(3, TimeUnit.SECONDS))
-            coordinator.offer(testYuvFrame(1_000, 30))
-            assertTrue(secondEdge.await(3, TimeUnit.SECONDS))
-            coordinator.offer(testYuvFrame(5_000, 30))
-            assertTrue(announcements.await(3, TimeUnit.SECONDS))
-            assertTrue(thirdEdge.await(3, TimeUnit.SECONDS))
-            assertEquals(2, calls.get())
-        }
-    }
-
-    @Test
-    fun `manual description preempts running automatic inference`() {
-        val autoStarted = CountDownLatch(1)
-        val edgeReady = CountDownLatch(1)
-        val manualDelivered = CountDownLatch(1)
-        val autoCallbacks = AtomicInteger()
-        val manualText = AtomicReference<String?>()
-        val describer = object : SceneDescriber {
-            override fun describe(frame: Yuv420Frame, map: TactileMap?): SceneDescription {
-                if (Thread.currentThread().name == "touchscene-description" && autoStarted.count > 0) {
-                    autoStarted.countDown()
-                    try { Thread.sleep(3_000) } catch (_: InterruptedException) { /* manual preemption */ }
-                    return SceneDescription("cancelled-auto", frame.sourceTimestampMs, "test")
-                }
-                return SceneDescription("manual", frame.sourceTimestampMs, "test")
-            }
-        }
-        TouchSceneCoordinator(
-            describer = describer,
-            onAutomaticDescription = { autoCallbacks.incrementAndGet() },
-        ) { update -> if (update.map != null) edgeReady.countDown() }.use { coordinator ->
-            coordinator.offer(testYuvFrame(0, 30))
-            assertTrue(autoStarted.await(1, TimeUnit.SECONDS))
-            assertTrue(edgeReady.await(3, TimeUnit.SECONDS))
-            coordinator.describeLatest { result -> manualText.set(result?.text); manualDelivered.countDown() }
-            assertTrue(manualDelivered.await(1, TimeUnit.SECONDS))
-            assertEquals("manual", manualText.get())
-            assertEquals(0, autoCallbacks.get())
-        }
-    }
-
-    @Test
-    fun `manual query immediately reuses recent automatic description only while stable and fresh`() {
-        val now = AtomicLong(0)
-        val autoDelivered = CountDownLatch(1)
-        val candidateReady = CountDownLatch(1)
-        val stableFrameReady = CountDownLatch(1)
-        val refreshed = CountDownLatch(1)
-        val calls = AtomicInteger()
-        val automatic = AtomicReference<SceneDescription?>()
-        val stableState = AtomicReference<StabilityState>()
-        val describer = object : SceneDescriber {
-            override fun describe(frame: Yuv420Frame, map: TactileMap?): SceneDescription =
-                SceneDescription("analysis-${calls.incrementAndGet()}", frame.sourceTimestampMs, "test")
-        }
-        TouchSceneCoordinator(
-            describer = describer,
-            clockMs = { now.get() },
-            onAutomaticDescription = { automatic.set(it); autoDelivered.countDown() },
-        ) { update ->
-            if (update.debugSnapshot?.source?.sourceTimestampMs == 100L) candidateReady.countDown()
-            if (update.debugSnapshot?.source?.sourceTimestampMs == 700L) {
-                stableState.set(update.stabilityState)
-                stableFrameReady.countDown()
-            }
-        }.use { coordinator ->
-            coordinator.offer(testYuvFrame(0, 30))
-            assertTrue(autoDelivered.await(3, TimeUnit.SECONDS))
-            assertTrue(coordinator.isCurrentAutomaticDescription(automatic.get()!!))
-            coordinator.offer(testYuvFrame(100, 30))
-            assertTrue(candidateReady.await(3, TimeUnit.SECONDS))
-            coordinator.offer(testYuvFrame(700, 30))
-            assertTrue(stableFrameReady.await(3, TimeUnit.SECONDS))
-            assertEquals(StabilityState.STABLE, stableState.get())
-            assertTrue(coordinator.isCurrentAutomaticDescription(automatic.get()!!))
-            var immediate: SceneDescription? = null
-            coordinator.describeLatest { immediate = it }
-            assertEquals("analysis-1", immediate?.text)
-            assertEquals(1, calls.get())
-            now.set(5_001)
-            coordinator.describeLatest { refreshed.countDown() }
-            assertTrue(refreshed.await(3, TimeUnit.SECONDS))
-            assertEquals(2, calls.get())
-        }
-    }
-
-    @Test
-    fun `camera movement invalidates recent automatic description before another manual query`() {
-        val autoDelivered = CountDownLatch(1)
-        val candidateReady = CountDownLatch(1)
-        val stableFrameReady = CountDownLatch(1)
-        val movedFrameReady = CountDownLatch(1)
-        val manualDelivered = CountDownLatch(1)
-        val calls = AtomicInteger()
-        val automatic = AtomicReference<SceneDescription?>()
-        val manual = AtomicReference<SceneDescription?>()
-        val describer = object : SceneDescriber {
-            override fun describe(frame: Yuv420Frame, map: TactileMap?): SceneDescription =
-                SceneDescription("analysis-${calls.incrementAndGet()}", frame.sourceTimestampMs, "test")
-        }
-        TouchSceneCoordinator(
-            describer = describer,
-            onAutomaticDescription = { automatic.set(it); autoDelivered.countDown() },
-        ) { update ->
-            when (update.debugSnapshot?.source?.sourceTimestampMs) {
-                100L -> candidateReady.countDown()
-                700L -> stableFrameReady.countDown()
-                800L -> movedFrameReady.countDown()
-            }
-        }.use { coordinator ->
-            coordinator.offer(testYuvFrame(0, 30))
-            assertTrue(autoDelivered.await(3, TimeUnit.SECONDS))
-            coordinator.offer(testYuvFrame(100, 30))
-            assertTrue(candidateReady.await(3, TimeUnit.SECONDS))
-            coordinator.offer(testYuvFrame(700, 30))
-            assertTrue(stableFrameReady.await(3, TimeUnit.SECONDS))
-            assertTrue(coordinator.isCurrentAutomaticDescription(automatic.get()!!))
-            coordinator.offer(testYuvFrame(800, 100))
-            assertTrue(movedFrameReady.await(3, TimeUnit.SECONDS))
-            assertFalse(coordinator.isCurrentAutomaticDescription(automatic.get()!!))
-            coordinator.describeLatest { manual.set(it); manualDelivered.countDown() }
-            assertTrue(manualDelivered.await(3, TimeUnit.SECONDS))
-            assertEquals("analysis-2", manual.get()?.text)
-        }
-    }
-
-    @Test
     fun `frozen exploration describes its own frame instead of a recent live result`() {
-        val autoDelivered = CountDownLatch(1)
         val frozenFrameReady = CountDownLatch(1)
         val described = CountDownLatch(1)
         val calls = AtomicInteger()
@@ -477,20 +290,16 @@ class TouchSceneCoreTest {
             override fun describe(frame: Yuv420Frame, map: TactileMap?): SceneDescription =
                 SceneDescription("frame-${frame.sourceTimestampMs}-${calls.incrementAndGet()}", frame.sourceTimestampMs, "test")
         }
-        TouchSceneCoordinator(
-            describer = describer,
-            onAutomaticDescription = { autoDelivered.countDown() },
-        ) { update ->
+        TouchSceneCoordinator(describer = describer) { update ->
             if (update.debugSnapshot?.source?.sourceTimestampMs == 100L) frozenFrameReady.countDown()
         }.use { coordinator ->
             coordinator.offer(testYuvFrame(0, 30))
-            assertTrue(autoDelivered.await(3, TimeUnit.SECONDS))
             coordinator.offer(testYuvFrame(100, 30))
             assertTrue(frozenFrameReady.await(3, TimeUnit.SECONDS))
             assertNotNull(coordinator.freeze())
             coordinator.describeLatest { result.set(it); described.countDown() }
             assertTrue(described.await(3, TimeUnit.SECONDS))
-            assertEquals("frame-100-2", result.get()?.text)
+            assertEquals("frame-100-1", result.get()?.text)
         }
     }
 
@@ -732,16 +541,120 @@ class TouchSceneCoreTest {
     }
 
     @Test
-    fun `exploration boundary and keypoint rhythms stay distinct`() {
-        val config = HapticPatternConfig()
-        assertArrayEquals(longArrayOf(0, 150), config.edgeTimings())
-        assertArrayEquals(longArrayOf(0, 50, 50, 50), config.keyPointTimings())
+    fun `haptic sustained timings match minimal binary contract`() {
+        assertArrayEquals(longArrayOf(0L, 80L, 40L), AndroidHapticRenderer.SUSTAINED_TIMINGS)
+        assertArrayEquals(intArrayOf(0, 255, 0), AndroidHapticRenderer.SUSTAINED_AMPLITUDES)
+        assertEquals(140L, AndroidHapticRenderer.MINIMUM_ON_MS)
+        assertEquals(90L, AndroidHapticRenderer.EXIT_GRACE_MS)
+    }
+
+    @Test
+    fun `contour haptic mask creates a band but keeps distant interior silent`() {
+        val width = 15
+        val height = 15
+        val boundary = BooleanArray(width * height)
+        for (x in 3..11) {
+            boundary[3 * width + x] = true
+            boundary[11 * width + x] = true
+        }
+        for (y in 3..11) {
+            boundary[y * width + 3] = true
+            boundary[y * width + 11] = true
+        }
+        val band = ContourHapticMask.build(boundary, width, height, radius = 2)
+        assertTrue(band[3 * width + 7])
+        assertTrue(band[5 * width + 7])
+        assertFalse(band[7 * width + 7])
+        assertFalse(band[0])
+    }
+
+    @Test
+    fun `contour radius is defined in display dp not tactile grid cells`() {
+        assertEquals(
+            5,
+            ContourHapticMask.radiusForDisplay(
+                analysisWidth = 400,
+                analysisHeight = 500,
+                viewWidth = 800,
+                viewHeight = 1_000,
+                density = 1f,
+            ),
+        )
+    }
+
+    @Test
+    fun `bailian request body follows openai compatible vision protocol`() {
+        val body = JSONObject(RemoteAiSceneDescriber.buildRequestBody("qwen3-vl-flash", "QUJD"))
+        assertEquals("qwen3-vl-flash", body.getString("model"))
+        assertEquals(false, body.getBoolean("enable_thinking"))
+        assertEquals("json_object", body.getJSONObject("response_format").getString("type"))
+        val content = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+        assertEquals("text", content.getJSONObject(0).getString("type"))
+        assertEquals(
+            "data:image/jpeg;base64,QUJD",
+            content.getJSONObject(1).getJSONObject("image_url").getString("url"),
+        )
+    }
+
+    @Test
+    fun `bailian response parser reads description from json content`() {
+        val body = """{"choices":[{"message":{"content":"{\"description\":\"主体居中，占比中等。\"}"}}]}"""
+        assertEquals("主体居中，占比中等。", RemoteAiSceneDescriber.parseResponseText(body))
+    }
+
+    @Test
+    fun `bailian response parser handles part array and plain text fallback`() {
+        val parts =
+            """{"choices":[{"message":{"content":[{"type":"text","text":"{\"description\":\"一位行人在右侧。\"}"}]}}]}"""
+        assertEquals("一位行人在右侧。", RemoteAiSceneDescriber.parseResponseText(parts))
+        val plain = """{"choices":[{"message":{"content":"画面里有一棵树。"}}]}"""
+        assertEquals("画面里有一棵树。", RemoteAiSceneDescriber.parseResponseText(plain))
+        assertNull(RemoteAiSceneDescriber.parseResponseText("""{"choices":[{"message":{"content":"  "}}]}"""))
+        assertNull(RemoteAiSceneDescriber.parseResponseText("not json"))
+    }
+
+    @Test
+    fun `bailian asr request embeds wav data and chinese options`() {
+        val body = JSONObject(RemoteAsrTranscriber.buildRequestBody("qwen3-asr-flash", "QUJD"))
+        assertEquals("qwen3-asr-flash", body.getString("model"))
+        assertFalse(body.getBoolean("stream"))
+        val audio = body.getJSONArray("messages").getJSONObject(0)
+            .getJSONArray("content").getJSONObject(0)
+        assertEquals("input_audio", audio.getString("type"))
+        assertEquals("data:audio/wav;base64,QUJD", audio.getJSONObject("input_audio").getString("data"))
+        assertEquals("zh", body.getJSONObject("asr_options").getString("language"))
+        assertFalse(body.getJSONObject("asr_options").getBoolean("enable_itn"))
+    }
+
+    @Test
+    fun `bailian asr response parser supports text and content parts`() {
+        val plain = """{"choices":[{"message":{"content":"拍照"}}]}"""
+        val parts = """{"choices":[{"message":{"content":[{"type":"text","text":"停止"},{"type":"text","text":"摄影"}]}}]}"""
+        assertEquals("拍照", RemoteAsrTranscriber.parseResponseText(plain))
+        assertEquals("停止摄影", RemoteAsrTranscriber.parseResponseText(parts))
+        assertNull(RemoteAsrTranscriber.parseResponseText("not json"))
+    }
+
+    @Test
+    fun `wav encoder writes a valid mono pcm header`() {
+        val pcm = byteArrayOf(1, 2, 3, 4)
+        val wav = WavPcmEncoder.encode(pcm, sampleRate = 16_000, channels = 1, bitsPerSample = 16)
+        assertEquals("RIFF", wav.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        assertEquals("WAVE", wav.copyOfRange(8, 12).toString(Charsets.US_ASCII))
+        assertEquals("data", wav.copyOfRange(36, 40).toString(Charsets.US_ASCII))
+        assertEquals(4, littleEndianInt(wav, 40))
+        assertArrayEquals(pcm, wav.copyOfRange(44, wav.size))
     }
 
     @Test
     fun `voice parser accepts whitelist and rejects open text`() {
         assertEquals(VoiceCommand.TakePhoto, VoiceCommandParser.parse("拍一张！"))
-        assertEquals(VoiceCommand.StopRecording, VoiceCommandParser.parse("停止录制"))
+        assertEquals(VoiceCommand.StartStream, VoiceCommandParser.parse("开始录像"))
+        assertEquals(VoiceCommand.StopStream, VoiceCommandParser.parse("停止录像"))
+        assertEquals(VoiceCommand.FreezeFrame, VoiceCommandParser.parse("冻结当前画面"))
+        assertEquals(VoiceCommand.ReturnLive, VoiceCommandParser.parse("恢复视频流"))
+        assertEquals(VoiceCommand.ReturnLive, VoiceCommandParser.parse("取消冻结"))
+        assertEquals(VoiceCommand.ReturnLive, VoiceCommandParser.parse("返回实时"))
         assertTrue(VoiceCommandParser.parse("帮我找个人") is VoiceCommand.Unknown)
     }
 
@@ -764,67 +677,26 @@ class TouchSceneCoreTest {
     }
 
     @Test
-    fun `stability emits ready once per stable episode and rearms after movement`() {
-        val engine = VideoStabilityEngine(StabilityConfig(stableDurationMs = 600, readyCooldownMs = 2_000))
-        val frame = GrayFrame(32, 24, 0, ByteArray(32 * 24) { 80 })
-        val first = engine.update(frame, 0)
-        assertFalse(first.becameReady)
-        assertFalse(first.motionDetected)
-        assertFalse(engine.update(frame.copy(timestampMs = 100), 100).becameReady)
-        assertTrue(engine.update(frame.copy(timestampMs = 700), 700).becameReady)
-        assertFalse(engine.update(frame.copy(timestampMs = 800), 800).becameReady)
-        assertFalse(engine.update(frame.copy(timestampMs = 2_800), 2_800).becameReady)
-        val moved = frame.copy(timestampMs = 3_000, luminance = ByteArray(32 * 24) { 150.toByte() })
-        val movement = engine.update(moved, 3_000)
-        assertEquals(StabilityState.MOVING, movement.state)
-        assertTrue(movement.motionDetected)
-        assertFalse(engine.update(moved.copy(timestampMs = 3_100), 3_100).becameReady)
-        assertTrue(engine.update(moved.copy(timestampMs = 3_700), 3_700).becameReady)
-        assertFalse(engine.update(moved.copy(timestampMs = 5_800), 5_800).becameReady)
-    }
-
-    @Test
-    fun `rearmed ready waits for cooldown even after stability returns`() {
-        val engine = VideoStabilityEngine(StabilityConfig(stableDurationMs = 600, readyCooldownMs = 2_000))
-        val still = GrayFrame(32, 24, 0, ByteArray(32 * 24) { 80 })
-        val moved = still.copy(luminance = ByteArray(32 * 24) { 150.toByte() })
-        engine.update(still, 0)
-        engine.update(still, 100)
-        assertTrue(engine.update(still, 700).becameReady)
-        assertEquals(StabilityState.MOVING, engine.update(moved, 800).state)
-        engine.update(moved, 900)
-        assertFalse(engine.update(moved, 1_500).becameReady)
-        assertEquals(StabilityState.STABLE, engine.state)
-        assertTrue(engine.update(moved, 2_700).becameReady)
-        assertFalse(engine.update(moved, 4_800).becameReady)
-    }
-
-    @Test
-    fun `returning to live rearms ready without bypassing cooldown`() {
-        val engine = VideoStabilityEngine(StabilityConfig(stableDurationMs = 600, readyCooldownMs = 2_000))
-        val frame = GrayFrame(32, 24, 0, ByteArray(32 * 24) { 80 })
-        engine.update(frame, 0)
-        engine.update(frame, 100)
-        assertTrue(engine.update(frame, 700).becameReady)
-        assertFalse(engine.update(frame, 800).becameReady)
-        engine.rearmReady()
-        assertFalse(engine.update(frame, 1_500).becameReady)
-        assertTrue(engine.update(frame, 2_700).becameReady)
-        assertFalse(engine.update(frame, 4_800).becameReady)
-    }
-
-    @Test
-    fun `haptic gate does not restart fill and debounces edge re-entry`() {
-        val gate = HapticTransitionGate(edgeCooldownMs = 180)
-        assertEquals(HapticAction.FILL, gate.transition(GridPoint(1, 1), TactileCell.SUBJECT, 0))
-        assertNull(gate.transition(GridPoint(2, 1), TactileCell.SUBJECT, 10))
-        assertEquals(HapticAction.EDGE, gate.transition(GridPoint(3, 1), TactileCell.BOUNDARY, 20))
-        assertEquals(HapticAction.FILL, gate.transition(GridPoint(4, 1), TactileCell.SUBJECT, 30))
-        assertEquals(HapticAction.CANCEL, gate.transition(GridPoint(3, 1), TactileCell.BOUNDARY, 40))
-        assertNull(gate.transition(GridPoint(3, 2), TactileCell.BOUNDARY, 50))
-        assertEquals(HapticAction.FILL, gate.transition(GridPoint(4, 1), TactileCell.SUBJECT, 190))
-        assertEquals(HapticAction.EDGE, gate.transition(GridPoint(3, 1), TactileCell.BOUNDARY, 200))
-        assertEquals(HapticAction.CANCEL, gate.transition(null, TactileCell.BACKGROUND, 210))
+    fun `photo binary threshold splits luminance around 63`() {
+        val width = 128
+        val height = 96
+        val y = ByteArray(width * height) { idx ->
+            val col = idx % width
+            (if (col < width / 2) 20 else 200).toByte()
+        }
+        val frame = Yuv420Frame(
+            width = width,
+            height = height,
+            sourceTimestampMs = 1L,
+            receivedAtElapsedRealtimeMs = 1L,
+            y = y,
+            u = ByteArray((width / 2) * (height / 2)),
+            v = ByteArray((width / 2) * (height / 2)),
+        )
+        val layer = PhotoBinaryProcessor.process(frame)
+        assertEquals(PhotoBinaryProcessor.SHORT_EDGE, layer.width)
+        assertEquals(0, layer.at(0, layer.height / 2))
+        assertEquals(1, layer.at(layer.width - 1, layer.height / 2))
     }
 
     private fun mapOf(cell: TactileCell, version: Long): TactileMap {
@@ -832,6 +704,12 @@ class TouchSceneCoreTest {
         cells[65] = cell.code
         return TactileMap(version, version, cells = cells)
     }
+
+    private fun littleEndianInt(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xff) shl 24)
 
     private fun testYuvFrame(timestamp: Long, subjectLuma: Int): Yuv420Frame {
         val width = 256

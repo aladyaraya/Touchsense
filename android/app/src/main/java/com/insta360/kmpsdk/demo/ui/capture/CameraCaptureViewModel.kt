@@ -520,18 +520,24 @@ class CameraCaptureViewModel(
                 .orEmpty()
                 .filter { it != FunctionMode.NONE && it != FunctionMode.VIDEO_LIVE }
         val currentMode = cap.functionMode.getValue().getOrNull()
-        val selMode =
-            currentMode?.takeIf { supportedModes.contains(it) } ?: FunctionMode.VIDEO_NORMAL
-        if(supportNewCaptureControlFlow) {
-            cap.functionMode
-                .setValue(selMode)
-                .onFailure { Timber.w(it, "push local functionMode %s to camera failed", selMode) }
+        val selMode = currentMode?.takeIf { it in supportedModes }
+            ?: supportedModes.firstOrNull { it == FunctionMode.VIDEO_NORMAL }
+            ?: supportedModes.firstOrNull()
+            ?: FunctionMode.VIDEO_NORMAL // 模式为空时 SDK 可能连支持列表也无法返回
+        val mustWriteMode = supportNewCaptureControlFlow || currentMode != selMode
+        val modeWritten = if (mustWriteMode) {
+            cap.functionMode.setValue(selMode)
+                .onFailure { Timber.w(it, "set initial functionMode %s failed", selMode) }
+                .isSuccess
+        } else true
+        if (supportNewCaptureControlFlow || mustWriteMode) {
+            cap.syncAllParams() // 镜头或模式写入后，重新同步相机参数
         }
-        Timber.d("supportedModes = $supportedModes, currentMode = $currentMode, selMode = $selMode")
-        if(supportNewCaptureControlFlow) {
-            cap.syncAllParams() // 修改 lens 和 functionMode 后，重新同步参数列表
-        }
-        val rows = computeParamRows(cap, selMode)
+        val confirmedMode = cap.functionMode.getValue().getOrNull()
+        val readyMode = selMode.takeIf { modeWritten && confirmedMode == it }
+        Timber.d("supportedModes=%s currentMode=%s selected=%s confirmed=%s", supportedModes, currentMode, selMode, confirmedMode)
+        if (readyMode == null) Timber.w("Camera capture mode is not ready; capture disabled")
+        val rows = computeParamRows(cap, readyMode)
         val working = runCatching { cap.isWorking() }.getOrDefault(false)
 
         _ui.update {
@@ -539,7 +545,7 @@ class CameraCaptureViewModel(
             val effectiveFlowActive = if (working) true else it.captureFlowActive
             val (label, enabled) =
                 primaryButtonLabelAndEnabled(
-                    selMode,
+                    readyMode,
                     captureFlowActive = effectiveFlowActive,
                     sdkWorking = working,
                 )
@@ -548,7 +554,7 @@ class CameraCaptureViewModel(
                 lensOptions = lensOpts,
                 selectedLens = selLens,
                 modeOptions = supportedModes,
-                selectedMode = selMode,
+                selectedMode = readyMode,
                 captureButtonLabel = label,
                 captureButtonEnabled = enabled,
                 paramRows = rows,

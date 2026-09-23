@@ -5,37 +5,32 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 data class TouchSceneUpdate(
     val map: TactileMap? = null,
     val debugSnapshot: TactileDebugSnapshot? = null,
     val sessionState: TactileSessionState = TactileSessionState.LIVE,
-    val stabilityState: StabilityState = StabilityState.MOVING,
-    val ready: Boolean = false,
 )
 
 /** The source image and analysis layers belong to the same TouchMap version. */
 data class TactileDebugSnapshot(
     val source: Yuv420Frame,
     val result: TactileProcessingResult,
+    val photoBinary: PhotoBinaryLayer,
 ) {
     val version: Long get() = result.map.version
 }
 
 class TouchSceneCoordinator(
-    private val processor: CannyTactileProcessor = CannyTactileProcessor(),
+    private val frameProcessor: TactileFrameProcessor = DefaultTactileFrameProcessor(),
     private val describer: SceneDescriber = LocalContourSceneDescriber(),
     private val descriptionTimeoutMs: Long = 3_000L,
-    private val automaticDescriptionIntervalMs: Long = 5_000L,
-    private val onAutomaticDescription: ((SceneDescription) -> Unit)? = null,
-    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
     private val onUpdate: (TouchSceneUpdate) -> Unit,
 ) : AutoCloseable {
     init {
         require(descriptionTimeoutMs > 0)
-        require(automaticDescriptionIntervalMs > 0)
     }
 
     private class DescriptionRequest(
@@ -55,55 +50,35 @@ class TouchSceneCoordinator(
         val result: SceneDescription,
     )
 
-    private data class RecentAutomaticDescription(
-        val result: SceneDescription,
-        val analyzedFrameAtMs: Long,
-        val motionGeneration: Long,
-    )
-
     private val session = TactileSession()
-    private val stability = VideoStabilityEngine()
     private val latestOfferedFrame = AtomicReference<Yuv420Frame?>()
     private val latestVisionFrame = AtomicReference<Yuv420Frame?>()
     private val latestDebugSnapshot = AtomicReference<TactileDebugSnapshot?>()
     @Volatile private var frozenDebugSnapshot: TactileDebugSnapshot? = null
+    private val stillExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "touchscene-still") }
+    private val stillGeneration = AtomicLong(0L)
     private val descriptionExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "touchscene-description") }
     private val descriptionTimer = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "touchscene-description-timeout") }
     private val descriptionLock = Any()
     private var currentDescription: DescriptionRequest? = null
     private var cachedDescription: CachedDescription? = null
-    private var recentAutomaticDescription: RecentAutomaticDescription? = null
     private var descriptionClosed = false
-    private var lastAutomaticStartedAt = Long.MIN_VALUE
-    private var automaticToken = 0L
-    private var automaticRunning = false
-    private var automaticWorker: Future<*>? = null
-    private var automaticTimeout: ScheduledFuture<*>? = null
-    private val motionGeneration = AtomicLong()
     @Volatile private var rotationDegrees: Int = 0
     private val dispatcher =
         ParallelFrameDispatcher<Yuv420Frame>(
-            visionConsumer = {
-                latestVisionFrame.set(it)
-                scheduleAutomaticDescription(it)
-            },
+            visionConsumer = { latestVisionFrame.set(it) },
             edgeConsumer = { source ->
-                val frame = GrayFrame(source.width, source.height, source.receivedAtElapsedRealtimeMs, source.y)
-                val result = processor.processDetailed(frame)
+                val processed = frameProcessor.process(source)
+                val result = processed.result
                 val map = result.map
-                latestDebugSnapshot.set(TactileDebugSnapshot(source, result))
+                latestDebugSnapshot.set(TactileDebugSnapshot(source, result, processed.photoBinary))
                 session.updateLive(map)
-                val stabilityUpdate = stability.update(frame, frame.timestampMs)
-                if (stabilityUpdate.motionDetected) motionGeneration.incrementAndGet()
-                if (stabilityUpdate.state == StabilityState.MOVING) session.markStale()
                 val activeMap = session.activeMap()
                 onUpdate(
                     TouchSceneUpdate(
                         map = activeMap,
                         debugSnapshot = snapshotFor(activeMap),
                         sessionState = session.state,
-                        stabilityState = stabilityUpdate.state,
-                        ready = stabilityUpdate.becameReady,
                     ),
                 )
             },
@@ -115,6 +90,29 @@ class TouchSceneCoordinator(
         dispatcher.offer(rotated)
     }
 
+    /** Analyze one requested frame, then publish the completed map as a frozen snapshot. */
+    fun analyzeAndFreeze(frame: Yuv420Frame, rotationOverride: Int? = null) {
+        val generation = stillGeneration.incrementAndGet()
+        val rotated = frame.rotated(rotationOverride ?: rotationDegrees)
+        latestOfferedFrame.set(rotated)
+        stillExecutor.execute {
+            val processed = frameProcessor.process(rotated)
+            val result = processed.result
+            if (generation != stillGeneration.get()) return@execute
+            val snapshot = TactileDebugSnapshot(rotated, result, processed.photoBinary)
+            latestVisionFrame.set(rotated)
+            latestDebugSnapshot.set(snapshot)
+            session.updateLive(result.map)
+            val frozen = session.freeze() ?: return@execute
+            frozenDebugSnapshot = snapshot.takeIf { it.version == frozen.version }
+            onUpdate(TouchSceneUpdate(frozen, frozenDebugSnapshot, session.state))
+        }
+    }
+
+    fun cancelPendingStill() {
+        stillGeneration.incrementAndGet()
+    }
+
     fun setRotationDegrees(value: Int) {
         val normalized = ((value % 360) + 360) % 360
         require(normalized in setOf(0, 90, 180, 270))
@@ -122,18 +120,18 @@ class TouchSceneCoordinator(
         rotationDegrees = normalized
         if (session.markStale()) {
             val map = session.activeMap()
-            onUpdate(TouchSceneUpdate(map, snapshotFor(map), session.state, stability.state))
+            onUpdate(TouchSceneUpdate(map, snapshotFor(map), session.state))
         }
     }
 
     fun freeze(): TactileMap? = session.freeze()?.also {
         frozenDebugSnapshot = latestDebugSnapshot.get()?.takeIf { snapshot -> snapshot.version == it.version }
-        onUpdate(TouchSceneUpdate(it, frozenDebugSnapshot, session.state, stability.state))
+        onUpdate(TouchSceneUpdate(it, frozenDebugSnapshot, session.state))
     }
 
     fun refresh(): TactileMap? = session.refresh()?.also {
         frozenDebugSnapshot = latestDebugSnapshot.get()?.takeIf { snapshot -> snapshot.version == it.version }
-        onUpdate(TouchSceneUpdate(it, frozenDebugSnapshot, session.state, stability.state))
+        onUpdate(TouchSceneUpdate(it, frozenDebugSnapshot, session.state))
     }
 
     fun describeLatest(onResult: (SceneDescription?) -> Unit) {
@@ -149,7 +147,6 @@ class TouchSceneCoordinator(
         var cachedResult: SceneDescription? = null
         synchronized(descriptionLock) {
             if (descriptionClosed) return
-            cancelAutomaticLocked()
             if (frame != null) {
                 val active = currentDescription
                 if (active != null && active.frameTimestampMs == frame.sourceTimestampMs && active.mapVersion == map?.version) {
@@ -164,15 +161,6 @@ class TouchSceneCoordinator(
                 }?.also {
                     cachedResult = it.result
                     return@synchronized
-                }
-                if (live && !useNewerFrame && stability.state == StabilityState.STABLE) {
-                    recentAutomaticDescription?.takeIf {
-                        val age = clockMs() - it.analyzedFrameAtMs
-                        it.motionGeneration == motionGeneration.get() && age in 0..automaticDescriptionIntervalMs
-                    }?.also {
-                        cachedResult = it.result
-                        return@synchronized
-                    }
                 }
                 val request = DescriptionRequest(frame.sourceTimestampMs, map?.version, onResult)
                 currentDescription = request
@@ -193,81 +181,7 @@ class TouchSceneCoordinator(
     fun cancelDescription() {
         synchronized(descriptionLock) {
             cancelDescriptionLocked()
-            cancelAutomaticLocked()
-            recentAutomaticDescription = null
         }
-    }
-
-    fun isCurrentAutomaticDescription(description: SceneDescription): Boolean = synchronized(descriptionLock) {
-        val cached = recentAutomaticDescription ?: return@synchronized false
-        val age = clockMs() - cached.analyzedFrameAtMs
-        cached.result === description && cached.motionGeneration == motionGeneration.get() &&
-            age in 0..automaticDescriptionIntervalMs && session.currentState() == TactileSessionState.LIVE
-    }
-
-    private fun scheduleAutomaticDescription(frame: Yuv420Frame) {
-        if (onAutomaticDescription == null) return
-        synchronized(descriptionLock) {
-            if (descriptionClosed || currentDescription != null || automaticRunning ||
-                session.currentState() != TactileSessionState.LIVE) return
-            val nowMs = frame.receivedAtElapsedRealtimeMs
-            if (lastAutomaticStartedAt != Long.MIN_VALUE && nowMs >= lastAutomaticStartedAt &&
-                nowMs - lastAutomaticStartedAt < automaticDescriptionIntervalMs) return
-            lastAutomaticStartedAt = nowMs
-            automaticRunning = true
-            val token = ++automaticToken
-            val generation = motionGeneration.get()
-            val analyzedFrameAtMs = clockMs()
-            automaticWorker = descriptionExecutor.submit {
-                val map = latestDebugSnapshot.get()
-                    ?.takeIf {
-                        it.source.sourceTimestampMs == frame.sourceTimestampMs &&
-                            it.source.receivedAtElapsedRealtimeMs == frame.receivedAtElapsedRealtimeMs
-                    }
-                    ?.result?.map
-                finishAutomaticDescription(token, generation, analyzedFrameAtMs,
-                    runCatching { describer.describe(frame, map) }.getOrNull())
-            }
-            automaticTimeout = descriptionTimer.schedule({
-                finishAutomaticDescription(token, generation, analyzedFrameAtMs, null, cancelWorker = true)
-            }, descriptionTimeoutMs, TimeUnit.MILLISECONDS)
-        }
-    }
-
-    private fun finishAutomaticDescription(
-        token: Long,
-        generation: Long,
-        analyzedFrameAtMs: Long,
-        result: SceneDescription?,
-        cancelWorker: Boolean = false,
-    ) {
-        val callback = synchronized(descriptionLock) {
-            if (descriptionClosed || !automaticRunning || token != automaticToken) null else {
-                automaticRunning = false
-                automaticTimeout?.cancel(false)
-                automaticTimeout = null
-                if (cancelWorker) automaticWorker?.cancel(true)
-                automaticWorker = null
-                val usefulResult = result?.takeIf {
-                    it.text != "暂时没有可用的画面描述" && generation == motionGeneration.get()
-                }
-                if (usefulResult != null) {
-                    recentAutomaticDescription = RecentAutomaticDescription(usefulResult, analyzedFrameAtMs, generation)
-                }
-                if (usefulResult != null) onAutomaticDescription else null
-            }
-        }
-        if (callback != null && result != null) callback(result)
-    }
-
-    private fun cancelAutomaticLocked() {
-        if (!automaticRunning) return
-        automaticRunning = false
-        automaticToken++
-        automaticWorker?.cancel(true)
-        automaticTimeout?.cancel(false)
-        automaticWorker = null
-        automaticTimeout = null
     }
 
     private fun cancelDescriptionLocked() {
@@ -301,13 +215,14 @@ class TouchSceneCoordinator(
         if (session.currentState() == TactileSessionState.LIVE) return session.activeMap()
         session.leaveExploration()
         frozenDebugSnapshot = null
-        stability.rearmReady()
         val map = session.activeMap()
-        onUpdate(TouchSceneUpdate(map, snapshotFor(map), session.state, stability.state))
+        onUpdate(TouchSceneUpdate(map, snapshotFor(map), session.state))
         return map
     }
 
     fun activeMapVersion(): Long? = session.activeMap()?.version
+
+    fun currentSessionState(): TactileSessionState = session.currentState()
 
     private fun snapshotFor(map: TactileMap?): TactileDebugSnapshot? {
         if (map == null) return null
@@ -320,12 +235,13 @@ class TouchSceneCoordinator(
             if (descriptionClosed) false else {
                 descriptionClosed = true
                 cancelDescriptionLocked()
-                cancelAutomaticLocked()
                 true
             }
         }
         if (!shouldClose) return
+        cancelPendingStill()
         dispatcher.close()
+        stillExecutor.shutdownNow()
         descriptionExecutor.shutdownNow()
         descriptionTimer.shutdownNow()
         Thread({

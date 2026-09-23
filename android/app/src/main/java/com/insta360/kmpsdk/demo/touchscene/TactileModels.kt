@@ -1,11 +1,10 @@
 package com.insta360.kmpsdk.demo.touchscene
 
-/** The four values used by the stage architecture and the Android explorer. */
+/** Binary subject map plus a separately computed boundary. Three haptic states only. */
 enum class TactileCell(val code: Byte) {
     BACKGROUND(0),
     SUBJECT(1),
     BOUNDARY(2),
-    KEY_POINT(3),
     ;
 
     companion object {
