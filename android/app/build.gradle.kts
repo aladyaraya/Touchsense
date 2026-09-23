@@ -50,6 +50,11 @@ android {
             "TOUCHSCENE_AI_MODEL",
             "\"${touchSceneProperty("touchscene.ai.model") ?: "qwen3-vl-flash"}\"",
         )
+        buildConfigField(
+            "String",
+            "TOUCHSCENE_AI_ASR_MODEL",
+            "\"${touchSceneProperty("touchscene.ai.asrModel") ?: "qwen3-asr-flash"}\"",
+        )
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -114,4 +119,7 @@ dependencies {
 
     implementation(libs.inskmp.camera)
     implementation(libs.inskmp.media)
+
+    // OpenCV：边缘(自适应阈值+轮廓)与轮廓(GrabCut)算法所需
+    implementation(project(":opencv-sdk"))
 }

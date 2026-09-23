@@ -19,6 +19,9 @@
         <action
             android:id="@+id/action_connectionFragment_to_liveStreamFragment"
             app:destination="@id/liveStreamFragment" />
+        <action
+            android:id="@+id/action_connectionFragment_to_localImageRecognitionFragment"
+            app:destination="@id/localImageRecognitionFragment" />
     </fragment>
 
     <fragment
@@ -55,6 +58,12 @@
         android:name="com.insta360.kmpsdk.demo.ui.capture.PreviewFragment"
         android:label="拍摄（预览）"
         tools:layout="@layout/fragment_preview" />
+
+    <fragment
+        android:id="@+id/localImageRecognitionFragment"
+        android:name="com.insta360.kmpsdk.demo.ui.localimage.LocalImageRecognitionFragment"
+        android:label="@string/touchscene_local_image_page_title"
+        tools:layout="@layout/fragment_local_image_recognition" />
 
     <fragment
         android:id="@+id/captureFragment"

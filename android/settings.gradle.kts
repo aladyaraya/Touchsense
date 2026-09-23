@@ -49,3 +49,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AndroidSDKDemo"
 include(":app")
+include(":opencv-sdk")

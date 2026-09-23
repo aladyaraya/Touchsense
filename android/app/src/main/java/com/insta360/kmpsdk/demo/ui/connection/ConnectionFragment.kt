@@ -2,6 +2,7 @@ package com.insta360.kmpsdk.demo.ui.connection
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.os.Build
 import android.os.Bundle
@@ -10,9 +11,11 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
@@ -42,6 +45,23 @@ class ConnectionFragment : Fragment() {
     private var speechOutput: AndroidSpeechOutput? = null
     private var hapticRenderer: AndroidHapticRenderer? = null
     private var previousConnectState: ConnectState = ConnectState.Idle
+
+    private val localImagePicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null || _binding == null) return@registerForActivityResult
+            runCatching {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            if (findNavController().currentDestination?.id == R.id.connectionFragment) {
+                findNavController().navigate(
+                    R.id.action_connectionFragment_to_localImageRecognitionFragment,
+                    Bundle().apply { putString("localImageUri", uri.toString()) },
+                )
+            }
+        }
 
     private val scanAdapter =
         ScanDeviceAdapter(
@@ -74,83 +94,18 @@ class ConnectionFragment : Fragment() {
         activity?.findViewById<View>(R.id.bottom_nav)?.visibility = View.GONE
 
         // 拦截机制：防止 NestedScrollView 在用户按压/滑动按键时抢夺触摸事件
-        binding.connectionScrollView.gestureInterceptTarget = binding.btnWifi
+        binding.connectionScrollView.gestureInterceptTarget = binding.heroConnectCard
 
         binding.scanRecycler.layoutManager = LinearLayoutManager(requireContext())
         binding.scanRecycler.adapter = scanAdapter
         binding.scanRecycler.isNestedScrollingEnabled = false
 
-        // 手指按压/触碰到 Wi-Fi 按钮区域时产生与触觉图像一致的实时震动反馈 (参考 AndroidHapticRenderer / TactileMapView)
-        var isFingerOnButton = false
-        binding.btnWifi.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    isFingerOnButton = true
-                    v.parent?.requestDisallowInterceptTouchEvent(true)
-                    v.isPressed = true
-                    haptics.render(1)
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val isInside = event.x in 0f..v.width.toFloat() && event.y in 0f..v.height.toFloat()
-                    v.isPressed = isInside
-                    if (isInside) {
-                        if (!isFingerOnButton) {
-                            isFingerOnButton = true
-                            haptics.render(1)
-                        }
-                    } else {
-                        if (isFingerOnButton) {
-                            isFingerOnButton = false
-                            haptics.cancel()
-                        }
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                    v.isPressed = false
-                    haptics.cancel()
-                    val isInside = event.x in 0f..v.width.toFloat() && event.y in 0f..v.height.toFloat()
-                    if (isInside && isFingerOnButton) {
-                        v.performClick()
-                    }
-                    isFingerOnButton = false
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                    v.isPressed = false
-                    haptics.cancel()
-                    isFingerOnButton = false
-                    true
-                }
-                else -> false
-            }
-        }
-
-        // 屏蔽原生 Tooltip 弹窗，防止长按时系统窗口抢占焦点导致手势中断
-        binding.btnWifi.setOnLongClickListener {
-            true
-        }
-
-        // 针对 TalkBack 读屏手势探索：滑入按钮区域即震动，移出即停止
-        binding.btnWifi.setOnHoverListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_HOVER_ENTER -> haptics.render(1)
-                MotionEvent.ACTION_HOVER_EXIT -> haptics.cancel()
-            }
-            false
-        }
-
-        // 点击时发出“连接中”语音提示音并直接进入触觉摄影页面（确保终止触摸震动，避免进入循环震动）
-        binding.btnWifi.setOnClickListener {
-            haptics.cancel()
+        attachHomeActionButton(binding.btnWifi, "连接相机") {
             speechOutput?.speak("连接中")
             connectionViewModel.onConnectWifiClicked()
-            if (findNavController().currentDestination?.id == R.id.connectionFragment) {
-                findNavController().navigate(R.id.action_connectionFragment_to_previewFragment)
-            }
+        }
+        attachHomeActionButton(binding.btnLocalImage, "识别本地图片") {
+            localImagePicker.launch(arrayOf("image/*"))
         }
 
         binding.btnScan.setOnClickListener { requestBleScanPermissionsThenStartScan() }
@@ -191,7 +146,6 @@ class ConnectionFragment : Fragment() {
                     // 当处于“连接中”后，根据结果播报“连接成功”或“连接失败”
                     if (previousConnectState == ConnectState.Connecting) {
                         if (state.connectState == ConnectState.Connected) {
-                            speechOutput?.speak("连接成功")
                             haptics.playSuccess()
                             if (findNavController().currentDestination?.id == R.id.connectionFragment) {
                                 findNavController().navigate(R.id.action_connectionFragment_to_previewFragment)
@@ -297,6 +251,79 @@ class ConnectionFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         activity?.findViewById<View>(R.id.bottom_nav)?.visibility = View.GONE
+    }
+
+    /**
+     * 首页两个主入口共用触感与长按语音规则：按下即持续震动，
+     * 达到长按时间只播报一次功能名，松手不再误触点击操作。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun attachHomeActionButton(button: MaterialButton, longPressSpeech: String, onClick: () -> Unit) {
+        var fingerInside = false
+        var longPressAnnounced = false
+        val announceLongPress = Runnable {
+            if (fingerInside && button.isPressed && !longPressAnnounced) {
+                longPressAnnounced = true
+                speechOutput?.speak(longPressSpeech)
+            }
+        }
+        button.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    fingerInside = true
+                    longPressAnnounced = false
+                    view.parent?.requestDisallowInterceptTouchEvent(true)
+                    view.isPressed = true
+                    hapticRenderer?.render(1)
+                    view.postDelayed(announceLongPress, ViewConfiguration.getLongPressTimeout().toLong())
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val inside = event.x in 0f..view.width.toFloat() && event.y in 0f..view.height.toFloat()
+                    view.isPressed = inside
+                    if (inside && !fingerInside) {
+                        fingerInside = true
+                        hapticRenderer?.render(1)
+                    } else if (!inside && fingerInside) {
+                        fingerInside = false
+                        view.removeCallbacks(announceLongPress)
+                        hapticRenderer?.cancel()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    view.removeCallbacks(announceLongPress)
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                    view.isPressed = false
+                    hapticRenderer?.cancel()
+                    val inside = event.x in 0f..view.width.toFloat() && event.y in 0f..view.height.toFloat()
+                    if (inside && fingerInside && !longPressAnnounced) view.performClick()
+                    fingerInside = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    view.removeCallbacks(announceLongPress)
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                    view.isPressed = false
+                    hapticRenderer?.cancel()
+                    fingerInside = false
+                    true
+                }
+                else -> false
+            }
+        }
+        button.setOnLongClickListener { true }
+        button.setOnHoverListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_HOVER_ENTER -> hapticRenderer?.render(1)
+                MotionEvent.ACTION_HOVER_EXIT -> hapticRenderer?.cancel()
+            }
+            false
+        }
+        button.setOnClickListener {
+            hapticRenderer?.playSuccess()
+            onClick()
+        }
     }
 
     override fun onPause() {

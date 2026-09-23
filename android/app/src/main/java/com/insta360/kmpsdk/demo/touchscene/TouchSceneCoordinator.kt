@@ -24,7 +24,7 @@ data class TactileDebugSnapshot(
 }
 
 class TouchSceneCoordinator(
-    private val processor: CannyTactileProcessor = CannyTactileProcessor(),
+    private val frameProcessor: TactileFrameProcessor = DefaultTactileFrameProcessor(),
     private val describer: SceneDescriber = LocalContourSceneDescriber(),
     private val descriptionTimeoutMs: Long = 3_000L,
     private val onUpdate: (TouchSceneUpdate) -> Unit,
@@ -68,11 +68,10 @@ class TouchSceneCoordinator(
         ParallelFrameDispatcher<Yuv420Frame>(
             visionConsumer = { latestVisionFrame.set(it) },
             edgeConsumer = { source ->
-                val frame = GrayFrame(source.width, source.height, source.receivedAtElapsedRealtimeMs, source.y)
-                val result = processor.processDetailed(frame)
+                val processed = frameProcessor.process(source)
+                val result = processed.result
                 val map = result.map
-                val photoBinary = PhotoBinaryProcessor.process(source)
-                latestDebugSnapshot.set(TactileDebugSnapshot(source, result, photoBinary))
+                latestDebugSnapshot.set(TactileDebugSnapshot(source, result, processed.photoBinary))
                 session.updateLive(map)
                 val activeMap = session.activeMap()
                 onUpdate(
@@ -92,16 +91,15 @@ class TouchSceneCoordinator(
     }
 
     /** Analyze one requested frame, then publish the completed map as a frozen snapshot. */
-    fun analyzeAndFreeze(frame: Yuv420Frame) {
+    fun analyzeAndFreeze(frame: Yuv420Frame, rotationOverride: Int? = null) {
         val generation = stillGeneration.incrementAndGet()
-        val rotated = frame.rotated(rotationDegrees)
+        val rotated = frame.rotated(rotationOverride ?: rotationDegrees)
         latestOfferedFrame.set(rotated)
         stillExecutor.execute {
-            val gray = GrayFrame(rotated.width, rotated.height, rotated.receivedAtElapsedRealtimeMs, rotated.y)
-            val result = processor.processDetailed(gray)
-            val photoBinary = PhotoBinaryProcessor.process(rotated)
+            val processed = frameProcessor.process(rotated)
+            val result = processed.result
             if (generation != stillGeneration.get()) return@execute
-            val snapshot = TactileDebugSnapshot(rotated, result, photoBinary)
+            val snapshot = TactileDebugSnapshot(rotated, result, processed.photoBinary)
             latestVisionFrame.set(rotated)
             latestDebugSnapshot.set(snapshot)
             session.updateLive(result.map)

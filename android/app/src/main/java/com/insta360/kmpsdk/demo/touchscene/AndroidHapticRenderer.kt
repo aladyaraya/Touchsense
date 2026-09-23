@@ -52,7 +52,7 @@ class AndroidHapticRenderer(context: Context) {
 
     private fun startSustained() {
         vibrator.cancel()
-        vibrator.vibrate(VibrationEffect.createWaveform(SUSTAINED_TIMINGS, 0))
+        vibrator.vibrate(VibrationEffect.createWaveform(SUSTAINED_TIMINGS, SUSTAINED_AMPLITUDES, 0))
     }
 
     private fun playWaveform(timings: LongArray, repeat: Int) {
@@ -61,6 +61,8 @@ class AndroidHapticRenderer(context: Context) {
     }
 
     companion object {
-        internal val SUSTAINED_TIMINGS = longArrayOf(0L, 20L, 160L)
+        // 原来 20ms 开 / 160ms 关的占空比过低；改为更明显的满幅规律脉冲。
+        internal val SUSTAINED_TIMINGS = longArrayOf(0L, 65L, 65L)
+        internal val SUSTAINED_AMPLITUDES = intArrayOf(0, 255, 0)
     }
 }

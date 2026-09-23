@@ -208,7 +208,9 @@ class TactileMapView @JvmOverloads constructor(
                 val p = TouchMapper.map(pixelX, pixelY, content, layer.width, layer.height) ?: return 0
                 layer.at(p.x, p.y)
             }
-            TactileDebugMode.BINARY -> sampleAnalysisBool(pixelX, pixelY, snapshot.result.subject, snapshot.result.width, snapshot.result.height)
+            // 轮廓层视觉上保留填充剪影，但触觉只由 64x48 网格中已加粗的边界带触发。
+            // 不直接采样单像素 boundary，避免轮廓太细而无法用手指稳定命中。
+            TactileDebugMode.BINARY -> if (cell == TactileCell.BOUNDARY) 1 else 0
             TactileDebugMode.EDGE -> sampleAnalysisBool(pixelX, pixelY, snapshot.result.cannyEdges, snapshot.result.width, snapshot.result.height)
             TactileDebugMode.GRAYSCALE, TactileDebugMode.ORIGINAL -> {
                 val gray = snapshot.result.gray

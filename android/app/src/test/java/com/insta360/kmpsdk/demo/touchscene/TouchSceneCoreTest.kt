@@ -542,7 +542,8 @@ class TouchSceneCoreTest {
 
     @Test
     fun `haptic sustained timings match minimal binary contract`() {
-        assertArrayEquals(longArrayOf(0L, 20L, 160L), AndroidHapticRenderer.SUSTAINED_TIMINGS)
+        assertArrayEquals(longArrayOf(0L, 65L, 65L), AndroidHapticRenderer.SUSTAINED_TIMINGS)
+        assertArrayEquals(intArrayOf(0, 255, 0), AndroidHapticRenderer.SUSTAINED_AMPLITUDES)
     }
 
     @Test
@@ -574,6 +575,39 @@ class TouchSceneCoreTest {
         assertEquals("画面里有一棵树。", RemoteAiSceneDescriber.parseResponseText(plain))
         assertNull(RemoteAiSceneDescriber.parseResponseText("""{"choices":[{"message":{"content":"  "}}]}"""))
         assertNull(RemoteAiSceneDescriber.parseResponseText("not json"))
+    }
+
+    @Test
+    fun `bailian asr request embeds wav data and chinese options`() {
+        val body = JSONObject(RemoteAsrTranscriber.buildRequestBody("qwen3-asr-flash", "QUJD"))
+        assertEquals("qwen3-asr-flash", body.getString("model"))
+        assertFalse(body.getBoolean("stream"))
+        val audio = body.getJSONArray("messages").getJSONObject(0)
+            .getJSONArray("content").getJSONObject(0)
+        assertEquals("input_audio", audio.getString("type"))
+        assertEquals("data:audio/wav;base64,QUJD", audio.getJSONObject("input_audio").getString("data"))
+        assertEquals("zh", body.getJSONObject("asr_options").getString("language"))
+        assertFalse(body.getJSONObject("asr_options").getBoolean("enable_itn"))
+    }
+
+    @Test
+    fun `bailian asr response parser supports text and content parts`() {
+        val plain = """{"choices":[{"message":{"content":"拍照"}}]}"""
+        val parts = """{"choices":[{"message":{"content":[{"type":"text","text":"停止"},{"type":"text","text":"摄影"}]}}]}"""
+        assertEquals("拍照", RemoteAsrTranscriber.parseResponseText(plain))
+        assertEquals("停止摄影", RemoteAsrTranscriber.parseResponseText(parts))
+        assertNull(RemoteAsrTranscriber.parseResponseText("not json"))
+    }
+
+    @Test
+    fun `wav encoder writes a valid mono pcm header`() {
+        val pcm = byteArrayOf(1, 2, 3, 4)
+        val wav = WavPcmEncoder.encode(pcm, sampleRate = 16_000, channels = 1, bitsPerSample = 16)
+        assertEquals("RIFF", wav.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        assertEquals("WAVE", wav.copyOfRange(8, 12).toString(Charsets.US_ASCII))
+        assertEquals("data", wav.copyOfRange(36, 40).toString(Charsets.US_ASCII))
+        assertEquals(4, littleEndianInt(wav, 40))
+        assertArrayEquals(pcm, wav.copyOfRange(44, wav.size))
     }
 
     @Test
@@ -634,6 +668,12 @@ class TouchSceneCoreTest {
         cells[65] = cell.code
         return TactileMap(version, version, cells = cells)
     }
+
+    private fun littleEndianInt(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xff) shl 24)
 
     private fun testYuvFrame(timestamp: Long, subjectLuma: Int): Yuv420Frame {
         val width = 256

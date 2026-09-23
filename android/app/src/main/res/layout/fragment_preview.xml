@@ -34,6 +34,37 @@
                 android:layout_height="match_parent"
                 android:importantForAccessibility="no"
                 android:visibility="gone" />
+
+            <!-- 语音指令圆形麦克风按钮：叠加在触觉图层下缘中央 -->
+            <LinearLayout
+                android:id="@+id/voice_mic_group"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|center_horizontal"
+                android:layout_marginBottom="16dp"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <ImageButton
+                    android:id="@+id/voice_mic_btn"
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
+                    android:background="@drawable/bg_mic_circle"
+                    android:contentDescription="@string/touchscene_mic_button_description"
+                    android:elevation="6dp"
+                    android:padding="14dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_mic" />
+
+                <TextView
+                    android:id="@+id/voice_mic_hint"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/touchscene_mic_hint"
+                    android:textColor="@color/touchscene_text_primary"
+                    android:textSize="12sp" />
+            </LinearLayout>
         </FrameLayout>
 
         <!-- 底部控制区域：占据剩余 1/4 (25%) -->

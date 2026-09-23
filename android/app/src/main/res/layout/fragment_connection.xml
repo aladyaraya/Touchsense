@@ -153,6 +153,30 @@
                     app:iconTint="#060C17"
                     app:rippleColor="#80FFFFFF" />
 
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_local_image"
+                    android:layout_width="match_parent"
+                    android:layout_height="68dp"
+                    android:layout_marginTop="14dp"
+                    android:backgroundTint="@color/touchscene_card_bg"
+                    android:contentDescription="@string/touchscene_local_image_accessibility"
+                    android:elevation="3dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:text="@string/touchscene_local_image_title"
+                    android:textColor="@color/touchscene_text_primary"
+                    android:textSize="17sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="16dp"
+                    app:icon="@android:drawable/ic_menu_gallery"
+                    app:iconGravity="textStart"
+                    app:iconPadding="14dp"
+                    app:iconSize="28dp"
+                    app:iconTint="@color/touchscene_primary"
+                    app:rippleColor="#8000E5FF"
+                    app:strokeColor="@color/touchscene_primary"
+                    app:strokeWidth="1.5dp" />
+
                 <!-- 连接过程/结果终端读数 -->
                 <TextView
                     android:id="@+id/connection_result"

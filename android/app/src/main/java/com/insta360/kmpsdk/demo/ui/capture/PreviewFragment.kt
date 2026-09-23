@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
+import android.content.ComponentName
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -18,7 +19,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Gravity
 import android.widget.FrameLayout
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
@@ -44,12 +44,16 @@ import com.arashivision.sdk.common.exception.InstaException
 import com.arashivision.sdk.common.exception.NativeException
 import com.arashivision.sdk.media.api.listener.PlayerViewListener
 import com.arashivision.sdk.media.api.params.PreviewParams
+import com.arashivision.sdk.media.api.work.WorkManager
 import com.arashivision.sdk.media.core.model.OffsetData
 import com.arashivision.sdk.media.player.preview.InstaCapturePlayerView
 import com.insta360.kmpsdk.demo.R
 import com.insta360.kmpsdk.demo.databinding.FragmentPreviewBinding
 import com.insta360.kmpsdk.demo.raw.LatestCameraFrameStore
 import com.insta360.kmpsdk.demo.raw.RawPreviewFramePipeline
+import com.insta360.kmpsdk.demo.raw.Yuv420Frame
+import com.insta360.kmpsdk.demo.raw.decodeSampledBitmap
+import com.insta360.kmpsdk.demo.raw.toYuv420Frame
 import com.insta360.kmpsdk.demo.touchscene.AndroidHapticRenderer
 import com.insta360.kmpsdk.demo.touchscene.TactileCell
 import com.insta360.kmpsdk.demo.touchscene.TactileMap
@@ -57,7 +61,10 @@ import com.insta360.kmpsdk.demo.touchscene.runPreviewCleanup
 import com.insta360.kmpsdk.demo.touchscene.runPreviewSdkSwitch
 import com.insta360.kmpsdk.demo.touchscene.AndroidSpeechOutput
 import com.insta360.kmpsdk.demo.touchscene.MlKitSceneDescriber
+import com.insta360.kmpsdk.demo.touchscene.ManualWavRecorder
+import com.insta360.kmpsdk.demo.touchscene.OpenCvTactileFrameProcessor
 import com.insta360.kmpsdk.demo.touchscene.RemoteAiSceneDescriber
+import com.insta360.kmpsdk.demo.touchscene.RemoteAsrTranscriber
 import com.insta360.kmpsdk.demo.touchscene.TactileDebugMode
 import com.insta360.kmpsdk.demo.touchscene.TactileSessionState
 import com.insta360.kmpsdk.demo.touchscene.TouchSceneCoordinator
@@ -78,7 +85,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 import java.util.concurrent.ExecutorService
@@ -107,6 +116,15 @@ class PreviewFragment : Fragment() {
     companion object {
         private const val LIVE_PREVIEW_FIRST_FRAME_TIMEOUT_MS = 3_000L
         private const val MAX_LIVE_PREVIEW_RECOVERY_ATTEMPTS = 2
+        private const val MAX_UPLOAD_LONG_EDGE = 1600
+        private const val MIC_PROMPT_WATCHDOG_MS = 8_000L
+        private const val MIC_PROMPT_MIN_CHECK_MS = 700L
+        private const val MIC_PROMPT_POLL_MS = 100L
+        private const val MIC_POST_PROMPT_DELAY_MS = 250L
+        private const val MIC_RETRY_DELAY_MS = 600L
+        private const val MIC_MANUAL_STOP_RESULT_WAIT_MS = 1_200L
+        private const val MIC_COMPLETE_SILENCE_MS = 1_800L
+        private const val MIC_POSSIBLY_COMPLETE_SILENCE_MS = 1_200L
     }
 
     private val connectionViewModel: ConnectionViewModel by activityViewModels {
@@ -136,7 +154,19 @@ class PreviewFragment : Fragment() {
     private var hapticRenderer: AndroidHapticRenderer? = null
     private var speechOutput: AndroidSpeechOutput? = null
     private var speechRecognizer: SpeechRecognizer? = null
+    private var manualWavRecorder: ManualWavRecorder? = null
+    private var remoteAsrTranscriber: RemoteAsrTranscriber? = null
     private val voiceTurnGate = VoiceTurnGate()
+    private var micArmed = false
+    private var micAwaitListen = false
+    private var micRestricted = false
+    private var micPermissionPending = false
+    private var micUiState = MicUiState.IDLE
+    private var micStopRequested = false
+    private var micPendingText = ""
+    private var micStartGeneration = 0L
+    private var micRecognitionGeneration = 0L
+    private var micTranscriptionGeneration = 0L
     private var manualDescriptionPending = false
     private var trace = TouchSceneTrace()
     private var performanceMetrics = TouchScenePerformanceMetrics()
@@ -149,6 +179,7 @@ class PreviewFragment : Fragment() {
     private var livePreviewView: InstaCapturePlayerView? = null
     private var latestCameraPosture: CameraPosture? = null
     private val livePreviewFirstFrameRendered = AtomicBoolean(false)
+    private val streamStartedAnnounced = AtomicBoolean(false)
     private var livePreviewRecoveryAttempts = 0
     private var livePreviewWatchdogGeneration = 0L
     private val localDemoMode: Boolean get() = arguments?.getBoolean("touchsceneLocalDemo") == true
@@ -157,6 +188,8 @@ class PreviewFragment : Fragment() {
         View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> applyLivePreviewAspect() }
 
     private data class TactileCellCounts(val background: Int, val subject: Int, val boundary: Int)
+
+    private enum class MicUiState { IDLE, PROMPTING, PREPARING, LISTENING, PROCESSING }
 
     private fun computeCounts(map: TactileMap): TactileCellCounts {
         var bg = 0; var sub = 0; var bnd = 0
@@ -197,7 +230,17 @@ class PreviewFragment : Fragment() {
 
     private val microphonePermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startVoiceRecognition() else speechOutput?.speak("需要麦克风权限才能使用语音命令")
+            val forMic = micPermissionPending
+            micPermissionPending = false
+            if (!granted) {
+                micArmed = false
+                micRestricted = false
+                micAwaitListen = false
+                updateMicUi(MicUiState.IDLE)
+                speechOutput?.speak("需要麦克风权限才能使用语音命令")
+                return@registerForActivityResult
+            }
+            if (forMic) beginMicPrompt() else startVoiceRecognition()
         }
 
     private val streamListener =
@@ -242,7 +285,6 @@ class PreviewFragment : Fragment() {
                 _binding?.root?.post {
                     if (_binding == null) return@post
                     updateStreamToggleLabel()
-                    speechOutput?.speak(getString(R.string.touchscene_stream_started))
                 }
             }
 
@@ -363,6 +405,10 @@ class PreviewFragment : Fragment() {
         setupTouchScene()
 
         // 自动开启视频流：无需用户手动点击开关
+        if (!localDemoMode && connectionViewModel.getCameraDevice() != null) {
+            binding.touchsceneStatus.setText(R.string.touchscene_stream_starting)
+            speechOutput?.speak(getString(R.string.touchscene_stream_starting))
+        }
         startPreviewIfNeeded()
 
         // 底部操作区双按钮：触觉震动反馈与功能绑定
@@ -376,11 +422,9 @@ class PreviewFragment : Fragment() {
             }
         }
 
-        attachTactileHapticFeedback(binding.uploadImageBtn) {
-            val message = getString(R.string.touchscene_upload_image_hint)
-            speechOutput?.speak(message)
-            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
-        }
+        attachTactileHapticFeedback(binding.uploadImageBtn) { uploadCameraImage() }
+
+        attachTactileHapticFeedback(binding.voiceMicBtn) { onMicButtonClicked() }
 
         binding.openModeParamsSheet.setOnClickListener {
             CaptureParamsBottomSheetFragment.show(childFragmentManager)
@@ -657,6 +701,10 @@ class PreviewFragment : Fragment() {
                 _binding?.root?.post {
                     if (!isAdded || _binding == null) return@post
                     updateLivePreviewVisibility()
+                    if (streamStartedAnnounced.compareAndSet(false, true)) {
+                        binding.touchsceneStatus.setText(R.string.touchscene_stream_started)
+                        speechOutput?.speak(getString(R.string.touchscene_stream_started))
+                    }
                 }
             }
 
@@ -858,6 +906,7 @@ class PreviewFragment : Fragment() {
         }
         touchSceneCoordinator =
             TouchSceneCoordinator(
+                frameProcessor = OpenCvTactileFrameProcessor(),
                 describer = RemoteAiSceneDescriber(
                     requireContext(),
                     fallback = MlKitSceneDescriber(requireContext()),
@@ -880,9 +929,9 @@ class PreviewFragment : Fragment() {
                     }
                 }
             }
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(requireContext()).also {
-            it.setRecognitionListener(buildRecognitionListener())
-        }
+        speechRecognizer = createSpeechRecognizer().also(::bindRecognitionListener)
+        manualWavRecorder = ManualWavRecorder()
+        remoteAsrTranscriber = RemoteAsrTranscriber(requireContext())
 
         binding.freezeMapBtn.setOnClickListener { freezeCurrentFrame() }
         binding.refreshMapBtn.setOnClickListener {
@@ -1119,6 +1168,72 @@ class PreviewFragment : Fragment() {
         }
     }
 
+    /**
+     * 「上传图片」按钮：从影石相机拉取最新一张照片（而非手机本地图片），
+     * 转成与预览帧一致的 YUV420 后走同一条冻结/边缘·轮廓处理链路。
+     */
+    private fun uploadCameraImage() {
+        if (stillRequestInFlight) return
+        if (binding.tactileMapView.isFingerExploring) {
+            speechOutput?.speak(getString(R.string.touchscene_lift_finger_before_map_change))
+            return
+        }
+        if (localDemoMode || connectionViewModel.getCameraDevice() == null) {
+            traceEvent("upload", "rejected", code = "NO_CAMERA", fallback = if (localDemoMode) "local_demo" else null)
+            val message = getString(R.string.touchscene_upload_requires_camera)
+            binding.touchsceneStatus.text = message
+            speechOutput?.speak(message)
+            return
+        }
+        stillRequestInFlight = true
+        stillRequestIsRefresh = false
+        val generation = ++stillRequestGeneration
+        traceEvent("upload", "requested")
+        binding.freezeMapBtn.isEnabled = false
+        binding.refreshMapBtn.isEnabled = false
+        binding.toggleDescribeLiveBtn.isEnabled = false
+        binding.toggleDescribeLiveBtn.text = getString(R.string.touchscene_upload_fetching)
+        binding.touchsceneStatus.setText(R.string.touchscene_upload_fetching)
+        speechOutput?.speak(getString(R.string.touchscene_upload_fetching))
+        viewLifecycleOwner.lifecycleScope.launch {
+            val frame = runCatching { withContext(Dispatchers.IO) { loadNewestCameraPhotoFrame() } }.getOrNull()
+            if (_binding == null || !stillRequestInFlight || generation != stillRequestGeneration) return@launch
+            if (frame == null) {
+                failStillRequest(generation, "UPLOAD_FAILED")
+                return@launch
+            }
+            LatestCameraFrameStore.clear()
+            LatestCameraFrameStore.publish(frame)
+            binding.rawFrameStatus.text =
+                getString(R.string.raw_frame_ready_format, frame.width, frame.height, LatestCameraFrameStore.count())
+            touchSceneCoordinator?.analyzeAndFreeze(frame, rotationOverride = 0)
+        }
+        binding.root.postDelayed({
+            if (_binding == null || !stillRequestInFlight || generation != stillRequestGeneration) return@postDelayed
+            failStillRequest(generation, "UPLOAD_TIMEOUT")
+        }, 45_000L)
+    }
+
+    /** Downloads the newest photo stored on the connected camera and decodes it into a tactile frame. */
+    private suspend fun loadNewestCameraPhotoFrame(): Yuv420Frame? {
+        val works = WorkManager.getAllCameraWorks().getOrNull().orEmpty()
+        val photo = works.filter { it.isPhoto() }.maxByOrNull { it.getCreationTime() } ?: run {
+            Timber.w("upload: no photo found on camera")
+            return null
+        }
+        val receivedAt = SystemClock.elapsedRealtime()
+        val localPath =
+            if (photo.isLocalFile()) photo.mainUrls.firstOrNull()
+            else photo.download { _, _ -> }.getOrNull()?.firstOrNull()
+        val bitmap = localPath?.let { decodeSampledBitmap(it, MAX_UPLOAD_LONG_EDGE) }
+            ?: photo.loadThumbnail()
+            ?: return null
+        val frame = bitmap.toYuv420Frame(sourceTimestampMs = photo.getCreationTime(), receivedAtElapsedRealtimeMs = receivedAt)
+        bitmap.recycle()
+        Timber.d("upload: prepared frame ${frame.width}x${frame.height} from ${photo.mainUrls.firstOrNull()}")
+        return frame
+    }
+
     private fun describeLatestScene() {
         traceEvent("description", "requested", mapVersion = touchSceneCoordinator?.activeMapVersion())
         manualDescriptionPending = true
@@ -1157,13 +1272,258 @@ class PreviewFragment : Fragment() {
         if (_binding == null) return
         if (speaking) {
             if (voiceTurnGate.speechStarted()) speechRecognizer?.cancel()
-        } else if (voiceTurnGate.speechFinished()) {
-            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                startVoiceRecognition(resuming = true)
-            } else {
-                voiceTurnGate.reset()
+        } else {
+            if (micAwaitListen) {
+                micAwaitListen = false
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    scheduleMicListeningAfterPrompt()
+                } else {
+                    voiceTurnGate.reset()
+                    micArmed = false
+                    micRestricted = false
+                    updateMicUi(MicUiState.IDLE)
+                }
+                return
+            }
+            if (voiceTurnGate.speechFinished()) {
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    startVoiceRecognition(resuming = true)
+                } else {
+                    voiceTurnGate.reset()
+                }
             }
         }
+    }
+
+    /**
+     * 圆形麦克风按钮：第一次短按播报提示（播报期间不收音），提示结束后开始监听；
+     * 监听中再次短按则把音频转文本并按「拍照 / 摄影 / 停止摄影」三选一执行。
+     */
+    private fun onMicButtonClicked() {
+        if (micUiState == MicUiState.PROCESSING) return
+        if (micArmed) {
+            when (micUiState) {
+                MicUiState.LISTENING -> {
+                    stopManualRecordingAndTranscribe()
+                }
+                MicUiState.PROMPTING, MicUiState.PREPARING -> cancelMicSession()
+                MicUiState.PROCESSING, MicUiState.IDLE -> Unit
+            }
+            return
+        }
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            micPermissionPending = true
+            microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        beginMicPrompt()
+    }
+
+    /** 播报三指令提示；播报期间不收音，TTS 结束后由 [onSpeechOutputChanged] 启动监听。 */
+    private fun beginMicPrompt() {
+        micArmed = true
+        // 圆形按钮用自己的 AudioRecord 状态机，不再受 SpeechRecognizer 的静音超时影响。
+        micRestricted = false
+        micAwaitListen = true
+        micStopRequested = false
+        micPendingText = ""
+        updateMicUi(MicUiState.PROMPTING)
+        Timber.d("mic: begin prompt")
+        speechOutput?.speak(getString(R.string.touchscene_mic_prompt))
+        if (speechOutput?.isSpeaking() == true) {
+            pollMicPromptCompletion(SystemClock.elapsedRealtime())
+            // 部分机型 TTS 引擎不回调 utterance onDone（荣耀 voiceengine 实测如此），
+            // 给较慢的播报留足时间，超时后先停 TTS，再经缓冲开始监听。
+            binding.root.postDelayed({
+                if (_binding == null || !micAwaitListen) return@postDelayed
+                micAwaitListen = false
+                Timber.w("mic: TTS onDone missing; starting listen via watchdog")
+                speechOutput?.stop()
+                scheduleMicListeningAfterPrompt()
+            }, MIC_PROMPT_WATCHDOG_MS)
+        } else {
+            micAwaitListen = false
+            scheduleMicListeningAfterPrompt()
+        }
+    }
+
+    /** OEM TTS may omit onDone; poll the engine so listening begins as soon as audio really stops. */
+    private fun pollMicPromptCompletion(startedAtMs: Long) {
+        binding.root.postDelayed({
+            if (_binding == null || !micAwaitListen || !micArmed) return@postDelayed
+            val elapsed = SystemClock.elapsedRealtime() - startedAtMs
+            if (elapsed >= MIC_PROMPT_MIN_CHECK_MS && speechOutput?.isEngineSpeaking() != true) {
+                micAwaitListen = false
+                scheduleMicListeningAfterPrompt()
+            } else if (elapsed < MIC_PROMPT_WATCHDOG_MS) {
+                pollMicPromptCompletion(startedAtMs)
+            }
+        }, MIC_PROMPT_POLL_MS)
+    }
+
+    private fun scheduleMicListeningAfterPrompt() {
+        if (!micArmed || _binding == null) return
+        val generation = ++micStartGeneration
+        updateMicUi(MicUiState.PREPARING)
+        binding.root.postDelayed({
+            if (_binding == null || generation != micStartGeneration || !micArmed ||
+                micUiState != MicUiState.PREPARING
+            ) {
+                return@postDelayed
+            }
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                startManualRecording()
+            } else {
+                cancelMicSession()
+            }
+        }, MIC_POST_PROMPT_DELAY_MS)
+    }
+
+    private fun cancelMicSession() {
+        micStartGeneration++
+        micAwaitListen = false
+        micArmed = false
+        micRestricted = false
+        micStopRequested = false
+        micPendingText = ""
+        micTranscriptionGeneration++
+        voiceTurnGate.reset()
+        manualWavRecorder?.cancel()
+        speechRecognizer?.cancel()
+        speechOutput?.stop()
+        updateMicUi(MicUiState.IDLE)
+    }
+
+    private fun updateMicUi(state: MicUiState) {
+        micUiState = state
+        val b = _binding ?: return
+        val listening = state == MicUiState.LISTENING
+        b.voiceMicBtn.setBackgroundResource(
+            if (listening) R.drawable.bg_mic_listening_circle else R.drawable.bg_mic_circle,
+        )
+        val hint = when (state) {
+            MicUiState.IDLE -> R.string.touchscene_mic_hint
+            MicUiState.PROMPTING -> R.string.touchscene_mic_prompting
+            MicUiState.PREPARING -> R.string.touchscene_mic_preparing
+            MicUiState.LISTENING -> R.string.touchscene_mic_listening
+            MicUiState.PROCESSING -> R.string.touchscene_mic_processing
+        }
+        val description =
+            if (listening) R.string.touchscene_mic_button_listening_description
+            else R.string.touchscene_mic_button_description
+        b.voiceMicHint.setText(hint)
+        b.voiceMicBtn.setContentDescription(getString(description))
+        b.voiceMicBtn.isActivated = listening
+    }
+
+    private fun startManualRecording() {
+        val recorder = manualWavRecorder
+        val result = if (recorder == null) Result.failure(IllegalStateException("recorder unavailable"))
+        else recorder.start()
+        result.onSuccess {
+            Timber.d("mic: manual WAV recording started")
+            binding.touchsceneStatus.setText(R.string.touchscene_listening)
+            updateMicUi(MicUiState.LISTENING)
+        }.onFailure {
+            Timber.w(it, "mic: manual WAV recording failed to start")
+            micArmed = false
+            updateMicUi(MicUiState.IDLE)
+            speechOutput?.speak(getString(R.string.touchscene_mic_record_failed))
+        }
+    }
+
+    private fun stopManualRecordingAndTranscribe() {
+        micStartGeneration++
+        micArmed = false
+        updateMicUi(MicUiState.PROCESSING)
+        val generation = ++micTranscriptionGeneration
+        val recorder = manualWavRecorder
+        val transcriber = remoteAsrTranscriber
+        lifecycleScope.launch {
+            val result = runCatching {
+                val wav = withContext(Dispatchers.IO) {
+                    checkNotNull(recorder).stop().getOrThrow()
+                }
+                withContext(Dispatchers.IO) {
+                    checkNotNull(transcriber).transcribe(wav)
+                }
+            }
+            if (_binding == null || generation != micTranscriptionGeneration) return@launch
+            updateMicUi(MicUiState.IDLE)
+            result.onSuccess { text ->
+                Timber.d("mic: remote ASR completed transcriptLength=%d", text.length)
+                dispatchMicCommand(text)
+            }.onFailure {
+                Timber.w(it, "mic: remote ASR failed")
+                speechOutput?.speak(getString(R.string.touchscene_mic_cloud_failed))
+            }
+        }
+    }
+
+    /** Keep the recognizer alive across OEM silence segmentation until the user taps Stop. */
+    private fun restartManualMicListening(recreateRecognizer: Boolean = true) {
+        if (!micArmed || !micRestricted || micStopRequested || _binding == null) return
+        val generation = ++micStartGeneration
+        updateMicUi(MicUiState.LISTENING)
+        binding.root.postDelayed({
+            if (_binding == null || generation != micStartGeneration || !micArmed || !micRestricted || micStopRequested) {
+                return@postDelayed
+            }
+            if (recreateRecognizer) {
+                micRecognitionGeneration++
+                speechRecognizer?.destroy()
+                speechRecognizer = createSpeechRecognizer().also(::bindRecognitionListener)
+            }
+            voiceTurnGate.beginListening()
+            startVoiceRecognition(resuming = true)
+        }, MIC_RETRY_DELAY_MS)
+    }
+
+    private fun finishManualMicCommand(text: String) {
+        if (!micRestricted) return
+        micStartGeneration++
+        micRestricted = false
+        micArmed = false
+        micStopRequested = false
+        micPendingText = ""
+        voiceTurnGate.reset()
+        updateMicUi(MicUiState.IDLE)
+        if (text.isBlank()) {
+            speechOutput?.speak(getString(R.string.touchscene_speech_failed))
+        } else {
+            dispatchMicCommand(text)
+        }
+    }
+
+    private fun dispatchMicCommand(text: String) {
+        when {
+            text.contains("停止摄影") || text.contains("停止录像") -> switchModeAndCapture(FunctionMode.VIDEO_NORMAL, stop = true)
+            text.contains("拍照") || text.contains("拍一张") -> switchModeAndCapture(FunctionMode.PHOTO_NORMAL, stop = false)
+            text.contains("摄影") || text.contains("录像") -> switchModeAndCapture(FunctionMode.VIDEO_NORMAL, stop = false)
+            else -> speechOutput?.speak(getString(R.string.touchscene_mic_no_such_operation))
+        }
+    }
+
+    private fun createSpeechRecognizer(): SpeechRecognizer {
+        val context = requireContext()
+        // 系统默认识别服务可被 OEM/用户替换（magicvoice 实测立即拒绝第三方调用），Google 服务存在时显式绑定，离线模型也挂在该服务上
+        val google = ComponentName(
+            "com.google.android.tts",
+            "com.google.android.apps.speech.tts.googletts.service.GoogleTTSRecognitionService"
+        )
+        val present = runCatching { context.packageManager.getServiceInfo(google, 0) }.getOrNull() != null
+        Timber.d("mic: createSpeechRecognizer googleServicePresent=%b", present)
+        return if (present) {
+            runCatching { SpeechRecognizer.createSpeechRecognizer(context, google) }
+                .getOrDefault(SpeechRecognizer.createSpeechRecognizer(context))
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(context)
+        }
+    }
+
+    private fun bindRecognitionListener(recognizer: SpeechRecognizer) {
+        val generation = ++micRecognitionGeneration
+        recognizer.setRecognitionListener(buildRecognitionListener(generation))
     }
 
     private fun startVoiceRecognition(resuming: Boolean = false) {
@@ -1177,30 +1537,89 @@ class PreviewFragment : Fragment() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, MIC_COMPLETE_SILENCE_MS)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, MIC_POSSIBLY_COMPLETE_SILENCE_MS)
+            // 连接相机热点时手机无互联网，云端识别必然失败；优先使用端侧离线识别。
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
+        Timber.d("mic: startListening resuming=%b", resuming)
         runCatching { checkNotNull(speechRecognizer).startListening(intent) }
             .onFailure {
+                Timber.w(it, "mic: startListening failed")
                 voiceTurnGate.reset()
+                if (micRestricted) {
+                    micArmed = false
+                    micRestricted = false
+                    updateMicUi(MicUiState.IDLE)
+                }
                 speechOutput?.speak(getString(R.string.touchscene_speech_failed))
             }
     }
 
-    private fun buildRecognitionListener(): RecognitionListener =
+    private fun buildRecognitionListener(generation: Long): RecognitionListener =
         object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = Unit
-            override fun onBeginningOfSpeech() = Unit
+            override fun onReadyForSpeech(params: Bundle?) {
+                if (generation != micRecognitionGeneration) return
+                if (micRestricted && !micStopRequested) updateMicUi(MicUiState.LISTENING)
+            }
+            override fun onBeginningOfSpeech() {
+                if (generation != micRecognitionGeneration) return
+                if (micRestricted && !micStopRequested) updateMicUi(MicUiState.LISTENING)
+            }
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
-            override fun onEndOfSpeech() = Unit
+            override fun onEndOfSpeech() {
+                if (generation != micRecognitionGeneration) return
+                if (micRestricted && micStopRequested) updateMicUi(MicUiState.PROCESSING)
+            }
             override fun onError(error: Int) {
-                if (voiceTurnGate.recognitionFinished() && _binding != null) {
+                if (generation != micRecognitionGeneration) return
+                Timber.w("mic: recognition onError code=%d awaitListen=%b", error, micAwaitListen)
+                // 提示播报期收掉常驻监听所产生的 cancel 噪声，不能破坏麦克风状态机。
+                if (micAwaitListen) {
+                    return
+                }
+                val turnWasActive = voiceTurnGate.recognitionFinished()
+                val retryableSilence = error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || error == SpeechRecognizer.ERROR_NO_MATCH
+                if (micRestricted && micStopRequested) {
+                    finishManualMicCommand(micPendingText)
+                    return
+                }
+                val fatalError =
+                    error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ||
+                        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                if (turnWasActive && micRestricted && micArmed && !fatalError && _binding != null) {
+                    val serviceInterrupted = !retryableSilence
+                    restartManualMicListening(recreateRecognizer = serviceInterrupted)
+                    return
+                }
+                val wasMicCommand = micRestricted
+                micRestricted = false
+                micArmed = false
+                if (wasMicCommand) updateMicUi(MicUiState.IDLE)
+                if (turnWasActive && _binding != null) {
                     speechOutput?.speak(getString(R.string.touchscene_speech_failed))
                 }
             }
             override fun onResults(results: Bundle?) {
+                if (generation != micRecognitionGeneration) return
                 if (!voiceTurnGate.recognitionFinished() || _binding == null) return
                 val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-                dispatchVoiceCommand(VoiceCommandParser.parse(candidates.firstOrNull().orEmpty()))
+                val text = candidates.firstOrNull().orEmpty()
+                Timber.d("mic: recognition result restricted=%b text=%s", micRestricted, text)
+                if (micRestricted) {
+                    if (text.isNotBlank()) {
+                        micPendingText = listOf(micPendingText, text).filter { it.isNotBlank() }.joinToString(" ")
+                    }
+                    if (micStopRequested || !micArmed) {
+                        finishManualMicCommand(micPendingText)
+                    } else {
+                        restartManualMicListening(recreateRecognizer = true)
+                    }
+                } else {
+                    dispatchVoiceCommand(VoiceCommandParser.parse(text))
+                }
             }
             override fun onPartialResults(partialResults: Bundle?) = Unit
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -1229,7 +1648,12 @@ class PreviewFragment : Fragment() {
             return
         }
         if (previewStarted) {
-            speechOutput?.speak(getString(R.string.touchscene_stream_started))
+            speechOutput?.speak(
+                getString(
+                    if (streamStartedAnnounced.get()) R.string.touchscene_stream_started
+                    else R.string.touchscene_stream_starting,
+                ),
+            )
             return
         }
         speechOutput?.speak(getString(R.string.touchscene_stream_starting))
@@ -1307,6 +1731,8 @@ class PreviewFragment : Fragment() {
         }
         Timber.d("startPreviewIfNeeded -> init + startStream")
         traceEvent("preview", "start_requested")
+        streamStartedAnnounced.set(false)
+        binding.touchsceneStatus.setText(R.string.touchscene_stream_starting)
         prepareOnDemandFrameCapture()
         runCatching {
             device.preview.setPipeline(null)
@@ -1349,6 +1775,7 @@ class PreviewFragment : Fragment() {
         }
         cancelStillRequest()
         previewStarted = false
+        streamStartedAnnounced.set(false)
         traceEvent("preview", "stopped")
         updateStreamToggleLabel()
     }
@@ -1546,6 +1973,19 @@ class PreviewFragment : Fragment() {
     override fun onDestroyView() {
         Timber.d("onDestroyView")
         voiceTurnGate.reset()
+        micArmed = false
+        micAwaitListen = false
+        micRestricted = false
+        micPermissionPending = false
+        micUiState = MicUiState.IDLE
+        micStopRequested = false
+        micPendingText = ""
+        micStartGeneration++
+        micRecognitionGeneration++
+        micTranscriptionGeneration++
+        manualWavRecorder?.cancel()
+        manualWavRecorder = null
+        remoteAsrTranscriber = null
         stopPreview()
         _binding?.livePreviewContainer?.removeOnLayoutChangeListener(previewLayoutChangeListener)
         releaseLivePreviewPlayer()
