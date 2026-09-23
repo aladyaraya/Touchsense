@@ -38,6 +38,7 @@ class TactileMapView @JvmOverloads constructor(
     private var tactileMap: TactileMap? = null
     private var debugSnapshot: TactileDebugSnapshot? = null
     private var debugBitmap: Bitmap? = null
+    private var contourHapticMask: BooleanArray? = null
     private var pendingMap: TactileMap? = null
     private var hasPendingMap = false
     private var pendingDebugSnapshot: TactileDebugSnapshot? = null
@@ -159,6 +160,7 @@ class TactileMapView @JvmOverloads constructor(
     private fun rebuildDebugBitmap() {
         debugBitmap?.recycle()
         debugBitmap = null
+        contourHapticMask = null
         val snapshot = debugSnapshot ?: run { invalidate(); return }
         if (debugMode == TactileDebugMode.TOUCH_MAP) {
             invalidate()
@@ -176,10 +178,23 @@ class TactileMapView @JvmOverloads constructor(
                 Bitmap.createBitmap(pixels, layer.width, layer.height, Bitmap.Config.ARGB_8888)
             }
             else -> {
+                val contourBand = if (debugMode == TactileDebugMode.BINARY) {
+                    val radius = ContourHapticMask.radiusForDisplay(
+                        result.width,
+                        result.height,
+                        width,
+                        height,
+                        resources.displayMetrics.density,
+                    )
+                    ContourHapticMask.build(result.boundary, result.width, result.height, radius)
+                        .also { contourHapticMask = it }
+                } else {
+                    null
+                }
                 val pixels = IntArray(result.width * result.height) { i ->
                     val level = when (debugMode) {
                         TactileDebugMode.GRAYSCALE -> result.gray[i]
-                        TactileDebugMode.BINARY -> if (result.subject[i]) 255 else 0
+                        TactileDebugMode.BINARY -> if (contourBand?.get(i) == true) 255 else 0
                         TactileDebugMode.EDGE -> if (result.cannyEdges[i]) 255 else 0
                         else -> 0
                     }
@@ -208,9 +223,11 @@ class TactileMapView @JvmOverloads constructor(
                 val p = TouchMapper.map(pixelX, pixelY, content, layer.width, layer.height) ?: return 0
                 layer.at(p.x, p.y)
             }
-            // 轮廓层视觉上保留填充剪影，但触觉只由 64x48 网格中已加粗的边界带触发。
-            // 不直接采样单像素 boundary，避免轮廓太细而无法用手指稳定命中。
-            TactileDebugMode.BINARY -> if (cell == TactileCell.BOUNDARY) 1 else 0
+            // 显示与触觉命中共用同一张高分辨率轮廓带，不再经过 64x48 粗网格。
+            TactileDebugMode.BINARY -> {
+                val band = contourHapticMask ?: return 0
+                sampleAnalysisBool(pixelX, pixelY, band, snapshot.result.width, snapshot.result.height)
+            }
             TactileDebugMode.EDGE -> sampleAnalysisBool(pixelX, pixelY, snapshot.result.cannyEdges, snapshot.result.width, snapshot.result.height)
             TactileDebugMode.GRAYSCALE, TactileDebugMode.ORIGINAL -> {
                 val gray = snapshot.result.gray
@@ -333,11 +350,17 @@ class TactileMapView @JvmOverloads constructor(
         rebuildDebugBitmap()
     }
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w != oldw || h != oldh) rebuildDebugBitmap()
+    }
+
     override fun onDetachedFromWindow() {
         hapticRenderer?.cancel()
         finishFingerExploration()
         debugBitmap?.recycle()
         debugBitmap = null
+        contourHapticMask = null
         super.onDetachedFromWindow()
     }
 }

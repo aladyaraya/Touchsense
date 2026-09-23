@@ -2,6 +2,9 @@ package com.insta360.kmpsdk.demo.touchscene
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -21,6 +24,14 @@ class AndroidHapticRenderer(context: Context) {
 
     private var enabled = true
     private var activeValue = -1
+    private val handler = Handler(Looper.getMainLooper())
+    private var vibrationStartedAtMs = 0L
+    private var stopScheduled = false
+    private val delayedStop = Runnable {
+        vibrator.cancel()
+        activeValue = 0
+        stopScheduled = false
+    }
 
     fun setEnabled(value: Boolean) {
         enabled = value
@@ -29,9 +40,24 @@ class AndroidHapticRenderer(context: Context) {
 
     fun render(value: Int) {
         if (!enabled || !vibrator.hasVibrator()) return
-        if (value == activeValue) return
-        activeValue = value
-        if (value == 1) startSustained() else vibrator.cancel()
+        if (value == 1) {
+            handler.removeCallbacks(delayedStop)
+            stopScheduled = false
+            if (activeValue == 1) return
+            activeValue = 1
+            vibrationStartedAtMs = SystemClock.elapsedRealtime()
+            startSustained()
+            return
+        }
+        if (activeValue != 1) {
+            activeValue = 0
+            return
+        }
+        if (stopScheduled) return
+        val elapsed = SystemClock.elapsedRealtime() - vibrationStartedAtMs
+        val remainingMinimum = (MINIMUM_ON_MS - elapsed).coerceAtLeast(0L)
+        stopScheduled = true
+        handler.postDelayed(delayedStop, maxOf(EXIT_GRACE_MS, remainingMinimum))
     }
 
     fun renderDiscrete(value: Int) = render(value)
@@ -46,6 +72,8 @@ class AndroidHapticRenderer(context: Context) {
     }
 
     fun cancel() {
+        handler.removeCallbacks(delayedStop)
+        stopScheduled = false
         vibrator.cancel()
         activeValue = -1
     }
@@ -62,7 +90,9 @@ class AndroidHapticRenderer(context: Context) {
 
     companion object {
         // 原来 20ms 开 / 160ms 关的占空比过低；改为更明显的满幅规律脉冲。
-        internal val SUSTAINED_TIMINGS = longArrayOf(0L, 65L, 65L)
+        internal val SUSTAINED_TIMINGS = longArrayOf(0L, 80L, 40L)
         internal val SUSTAINED_AMPLITUDES = intArrayOf(0, 255, 0)
+        internal const val MINIMUM_ON_MS = 140L
+        internal const val EXIT_GRACE_MS = 90L
     }
 }

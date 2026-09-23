@@ -542,8 +542,44 @@ class TouchSceneCoreTest {
 
     @Test
     fun `haptic sustained timings match minimal binary contract`() {
-        assertArrayEquals(longArrayOf(0L, 65L, 65L), AndroidHapticRenderer.SUSTAINED_TIMINGS)
+        assertArrayEquals(longArrayOf(0L, 80L, 40L), AndroidHapticRenderer.SUSTAINED_TIMINGS)
         assertArrayEquals(intArrayOf(0, 255, 0), AndroidHapticRenderer.SUSTAINED_AMPLITUDES)
+        assertEquals(140L, AndroidHapticRenderer.MINIMUM_ON_MS)
+        assertEquals(90L, AndroidHapticRenderer.EXIT_GRACE_MS)
+    }
+
+    @Test
+    fun `contour haptic mask creates a band but keeps distant interior silent`() {
+        val width = 15
+        val height = 15
+        val boundary = BooleanArray(width * height)
+        for (x in 3..11) {
+            boundary[3 * width + x] = true
+            boundary[11 * width + x] = true
+        }
+        for (y in 3..11) {
+            boundary[y * width + 3] = true
+            boundary[y * width + 11] = true
+        }
+        val band = ContourHapticMask.build(boundary, width, height, radius = 2)
+        assertTrue(band[3 * width + 7])
+        assertTrue(band[5 * width + 7])
+        assertFalse(band[7 * width + 7])
+        assertFalse(band[0])
+    }
+
+    @Test
+    fun `contour radius is defined in display dp not tactile grid cells`() {
+        assertEquals(
+            5,
+            ContourHapticMask.radiusForDisplay(
+                analysisWidth = 400,
+                analysisHeight = 500,
+                viewWidth = 800,
+                viewHeight = 1_000,
+                density = 1f,
+            ),
+        )
     }
 
     @Test
