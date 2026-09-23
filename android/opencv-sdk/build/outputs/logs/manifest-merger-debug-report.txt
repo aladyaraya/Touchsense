@@ -1,0 +1,16 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml:2:1-72
+INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml:2:1-72
+	package
+		INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml
+	xmlns:android
+		ADDED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml:2:11-69
+uses-sdk
+INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml
+INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /Users/ryan/Dev/影石/TouchScene_团队同步资料_20260922/Touchsense/android/opencv-sdk/AndroidManifest.xml

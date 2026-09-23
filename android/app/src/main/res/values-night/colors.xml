@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="demo_background">#121212</color>
+    <color name="demo_primary_text">#F5F5F7</color>
+    <color name="demo_secondary_text">#AEAEB2</color>
+    <color name="demo_hint">#8E8E93</color>
+    <color name="demo_accent">#0A84FF</color>
+    <color name="demo_button_dark">#2C2C2E</color>
+    <color name="demo_card">#1C1C1E</color>
+    <color name="demo_divider">#2C2C2E</color>
+    <color name="demo_green">#32D74B</color>
+    <color name="demo_wifi_aware">#7E57C2</color>
+    <color name="demo_badge_bg">#173B1F</color>
+    <color name="demo_badge_text">#7DDE8A</color>
+    <color name="demo_yellow">#FFD60A</color>
+    <color name="demo_gallery_filter_tab_selected_bg">#18314D</color>
+    <color name="demo_blocking_scrim">#B3000000</color>
+    <color name="demo_blocking_progress_track">#66FFFFFF</color>
+
+    <!-- TouchScene 科技感主题色板 -->
+    <color name="touchscene_bg">#0A0F1D</color>
+    <color name="touchscene_card_bg">#131B2E</color>
+    <color name="touchscene_card_stroke">#1F2E4A</color>
+    <color name="touchscene_primary">#00E5FF</color>
+    <color name="touchscene_primary_dark">#0097A7</color>
+    <color name="touchscene_secondary_btn">#1E293B</color>
+    <color name="touchscene_accent_cyan">#00E5FF</color>
+    <color name="touchscene_accent_orange">#FF9100</color>
+    <color name="touchscene_success">#00E676</color>
+    <color name="touchscene_warning">#FFB300</color>
+    <color name="touchscene_text_primary">#FFFFFF</color>
+    <color name="touchscene_text_secondary">#94A3B8</color>
+    <color name="touchscene_text_muted">#64748B</color>
+</resources>
